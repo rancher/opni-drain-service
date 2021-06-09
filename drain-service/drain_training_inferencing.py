@@ -5,6 +5,9 @@ import logging
 import math
 import os
 import time
+
+# Standard Library
+from asyncio.exceptions import TimeoutError
 from collections import deque
 
 # Third Party
@@ -12,17 +15,12 @@ import numpy as np
 import pandas as pd
 from drain3.file_persistence import FilePersistence
 from drain3.template_miner import TemplateMiner
-from nats_wrapper import NatsWrapper
-
-pd.set_option("mode.chained_assignment", None)
-
-# Standard Library
-from asyncio.exceptions import TimeoutError
-
-# Third Party
 from elasticsearch import AsyncElasticsearch, TransportError
 from elasticsearch.exceptions import ConnectionTimeout
 from elasticsearch.helpers import BulkIndexError, async_streaming_bulk
+from opni_nats import NatsWrapper
+
+pd.set_option("mode.chained_assignment", None)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
 persistence = FilePersistence("drain3_state.bin")
@@ -310,7 +308,10 @@ async def training_signal_check():
                 stable = False
                 training_start_ts_ns = -1.0
 
-            if weighted_vol <= 0.15 and (train_on_next_chance or num_drain_templates > (2 * num_templates_in_last_train)):
+            if weighted_vol <= 0.15 and (
+                train_on_next_chance
+                or num_drain_templates > (2 * num_templates_in_last_train)
+            ):
                 num_templates_in_last_train = num_drain_templates
                 logging.info("SENDING TRAIN SIGNAL on iteration {}".format(iteration))
                 if training_start_ts_ns != -1.0:

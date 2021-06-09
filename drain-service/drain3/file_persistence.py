@@ -1,8 +1,5 @@
 """
-Description : This file implements the persist/restore from file
-Author      : Moshik Hershcovitch
-Author_email: moshikh@il.ibm.com
-License     : MIT
+Adopted from https://github.com/IBM/Drain3
 """
 
 # Standard Library

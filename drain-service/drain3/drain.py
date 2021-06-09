@@ -1,8 +1,5 @@
 """
-Description : This file implements the Drain algorithm for log parsing
-Author      : LogPAI team
-Modified by : david.ohana@ibm.com, moshikh@il.ibm.com
-License     : MIT
+Adopted from https://github.com/IBM/Drain3
 """
 # Standard Library
 from typing import Dict, List
