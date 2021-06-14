@@ -5,8 +5,6 @@ import logging
 import math
 import os
 import time
-
-# Standard Library
 from asyncio.exceptions import TimeoutError
 from collections import deque
 
