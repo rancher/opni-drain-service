@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import time
+from asyncio.exceptions import TimeoutError
 from collections import deque
 
 # Third Party
@@ -12,17 +13,12 @@ import numpy as np
 import pandas as pd
 from drain3.file_persistence import FilePersistence
 from drain3.template_miner import TemplateMiner
-from nats_wrapper import NatsWrapper
-
-pd.set_option("mode.chained_assignment", None)
-
-# Standard Library
-from asyncio.exceptions import TimeoutError
-
-# Third Party
 from elasticsearch import AsyncElasticsearch, TransportError
 from elasticsearch.exceptions import ConnectionTimeout
 from elasticsearch.helpers import BulkIndexError, async_streaming_bulk
+from opni_nats import NatsWrapper
+
+pd.set_option("mode.chained_assignment", None)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
 persistence = FilePersistence("drain3_state.bin")
@@ -202,8 +198,8 @@ async def update_es_logs(queue):
                 ):
                     action, result = result.popitem()
                     if not ok:
-                        logging.error("failed to %s document %s" % ())
-                logging.info("Updated {} anomalies in ES".format(len(anomaly_df)))
+                        logging.error("failed to {} document {}".format())
+                logging.info(f"Updated {len(anomaly_df)} anomalies in ES")
             except (BulkIndexError, ConnectionTimeout, TimeoutError) as exception:
                 logging.error(
                     "Failed to index data. Re-adding to logs_to_update_in_elasticsearch queue"
@@ -211,7 +207,7 @@ async def update_es_logs(queue):
                 logging.error(exception)
                 queue.put(anomaly_df)
             except TransportError as exception:
-                logging.info("Error in async_streaming_bulk {}".format(exception))
+                logging.info(f"Error in async_streaming_bulk {exception}")
                 if exception.status_code == "N/A":
                     logging.info("Elasticsearch connection error")
                     es = await setup_es_connection()
@@ -237,14 +233,14 @@ async def update_es_logs(queue):
             ):
                 action, result = result.popitem()
                 if not ok:
-                    logging.error("failed to %s document %s" % ())
-            logging.info("Updated {} logs in ES".format(len(df)))
+                    logging.error("failed to {} document {}".format())
+            logging.info(f"Updated {len(df)} logs in ES")
         except (BulkIndexError, ConnectionTimeout) as exception:
             logging.error("Failed to index data")
             logging.error(exception)
             queue.put(df)
         except TransportError as exception:
-            logging.info("Error in async_streaming_bulk {}".format(exception))
+            logging.info(f"Error in async_streaming_bulk {exception}")
             if exception.status_code == "N/A":
                 logging.info("Elasticsearch connection error")
                 es = await setup_es_connection()
@@ -310,9 +306,12 @@ async def training_signal_check():
                 stable = False
                 training_start_ts_ns = -1.0
 
-            if weighted_vol <= 0.15 and (train_on_next_chance or num_drain_templates > (2 * num_templates_in_last_train)):
+            if weighted_vol <= 0.15 and (
+                train_on_next_chance
+                or num_drain_templates > (2 * num_templates_in_last_train)
+            ):
                 num_templates_in_last_train = num_drain_templates
-                logging.info("SENDING TRAIN SIGNAL on iteration {}".format(iteration))
+                logging.info(f"SENDING TRAIN SIGNAL on iteration {iteration}")
                 if training_start_ts_ns != -1.0:
                     training_end_ts_ns = time.time_ns()
                     normal_periods.append(
@@ -340,10 +339,10 @@ if __name__ == "__main__":
         if not fail_keyword:
             continue
         if len(fail_keywords_str) > 0:
-            fail_keywords_str += "|({})".format(fail_keyword)
+            fail_keywords_str += f"|({fail_keyword})"
         else:
-            fail_keywords_str += "({})".format(fail_keyword)
-    logging.info("fail_keywords_str = {}".format(fail_keywords_str))
+            fail_keywords_str += f"({fail_keyword})"
+    logging.info(f"fail_keywords_str = {fail_keywords_str}")
 
     loop = asyncio.get_event_loop()
     incoming_logs_to_train_queue = asyncio.Queue(loop=loop)

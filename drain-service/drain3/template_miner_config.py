@@ -1,3 +1,6 @@
+"""
+Adopted from https://github.com/IBM/Drain3
+"""
 # Standard Library
 import ast
 import configparser

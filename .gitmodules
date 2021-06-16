@@ -1,3 +1,0 @@
-[submodule "opni-nats-wrapper"]
-	path = opni-nats-wrapper
-	url = https://github.com/rancher/opni-nats-wrapper.git

@@ -1,8 +1,5 @@
 """
-Description : This file implements wrapper of the Drain core algorithm - add persistent and recovery
-Author      : David Ohana, Moshik Hershcovitch, Eran Raichstein
-Author_email: david.ohana@ibm.com, moshikh@il.ibm.com, eranra@il.ibm.com
-License     : MIT
+Adopted from https://github.com/IBM/Drain3
 """
 # Standard Library
 import base64
@@ -96,7 +93,7 @@ class TemplateMiner:
 
         self.drain = drain
         logger.info(
-            "Restored {0} clusters with {1} messages".format(
+            "Restored {} clusters with {} messages".format(
                 len(drain.clusters), drain.get_total_cluster_size()
             )
         )
@@ -115,7 +112,7 @@ class TemplateMiner:
 
     def get_snapshot_reason(self, change_type, cluster_id):
         if change_type != "none":
-            return "{} ({})".format(change_type, cluster_id)
+            return f"{change_type} ({cluster_id})"
 
         diff_time_sec = time.time() - self.last_save_time
         if diff_time_sec >= self.config.snapshot_interval_minutes * 60:

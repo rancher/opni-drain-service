@@ -1,7 +1,5 @@
 """
-Description : A section-based runtime profiler.
-Author      : david.ohana@ibm.com
-License     : Apache v2
+Adopted from https://github.com/IBM/Drain3
 """
 # Standard Library
 import os
