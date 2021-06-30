@@ -51,11 +51,7 @@ async def consume_logs(incoming_logs_to_train_queue, logs_to_update_es):
         payload_queue=None,
         subscribe_handler=subscribe_handler,
     )
-    await nw.subscribe(
-        nats_subject="preprocessed_logs_control_plane",
-        payload_queue=None,
-        subscribe_handler=subscribe_handler,
-    )
+
     await nw.subscribe(
         nats_subject="anomalies",
         payload_queue=None,
