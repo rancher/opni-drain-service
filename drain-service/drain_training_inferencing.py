@@ -80,6 +80,9 @@ async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
                 }
                 inferencing_results.append(d)
 
+        if not inferencing_results:
+            continue
+
         df = pd.DataFrame(inferencing_results)
 
         update_counts = df["update_type"].value_counts().to_dict()
