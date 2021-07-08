@@ -103,12 +103,14 @@ class TemplateMiner:
         if self.config.snapshot_compress_state:
             state = base64.b64encode(zlib.compress(state))
 
+        num_drain_clusters = len(self.drain.clusters)
+
         logger.info(
-            f"Saving state of {len(self.drain.clusters)} clusters "
+            f"Saving state of {num_drain_clusters} clusters "
             f"with {self.drain.get_total_cluster_size()} messages, {len(state)} bytes, "
             f"reason: {snapshot_reason}"
         )
-        self.persistence_handler.save_state(state)
+        self.persistence_handler.save_state(state, num_drain_clusters)
 
     def get_snapshot_reason(self, change_type, cluster_id):
         if change_type != "none":

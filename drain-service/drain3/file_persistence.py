@@ -13,7 +13,11 @@ import boto3
 import botocore
 from botocore.client import Config
 from drain3.persistence_handler import PersistenceHandler
+from elasticsearch import Elasticsearch
 
+ES_ENDPOINT = os.environ["ES_ENDPOINT"]
+ES_USERNAME = os.environ["ES_USERNAME"]
+ES_PASSWORD = os.environ["ES_PASSWORD"]
 MINIO_SERVER_URL = os.environ["MINIO_SERVER_URL"]
 MINIO_ACCESS_KEY = os.environ["MINIO_ACCESS_KEY"]
 MINIO_SECRET_KEY = os.environ["MINIO_SECRET_KEY"]
@@ -24,6 +28,24 @@ class FilePersistence(PersistenceHandler):
         self.file_path = file_path
         self.connect_to_minio()
         self.last_minio_save_ts = -1
+        self.es = Elasticsearch(
+            [ES_ENDPOINT],
+            port=9200,
+            http_auth=(ES_USERNAME, ES_PASSWORD),
+            http_compress=True,
+            max_retries=10,
+            retry_on_status={100, 400, 503},
+            retry_on_timeout=True,
+            timeout=20,
+            use_ssl=True,
+            verify_certs=False,
+            sniff_on_start=False,
+            # refresh nodes after a node fails to respond
+            sniff_on_connection_fail=True,
+            # and also every 60 seconds
+            sniffer_timeout=60,
+            sniff_timeout=10,
+        )
 
     def connect_to_minio(self):
         self.minio_client = None
@@ -54,7 +76,7 @@ class FilePersistence(PersistenceHandler):
             logging.info("drain-model bucket does not exist so creating it now")
             self.minio_client.create_bucket(Bucket="drain-model")
 
-    def save_state(self, state):
+    def save_state(self, state, num_drain_clusters):
         pathlib.Path(self.file_path).write_bytes(state)
         if time.time() - self.last_minio_save_ts > 60:
             try:
@@ -65,6 +87,16 @@ class FilePersistence(PersistenceHandler):
                 self.last_minio_save_ts = time.time()
             except Exception as e:
                 logging.error("Unable to save DRAIN model into Minio")
+
+        drain_status_doc = {
+            "num_log_clusters": num_drain_clusters,
+            "update_type": "drain_persist",
+            "timestamp": int(time.time() * 1000),
+        }
+        try:
+            res = self.es.index(index="opni-drain-model-status", body=drain_status_doc)
+        except Exception as e:
+            logging.error("Error when indexing status to opni-drain-model-status")
 
     def load_state(self):
         try:
