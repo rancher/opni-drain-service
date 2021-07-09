@@ -246,6 +246,8 @@ async def update_es_logs(queue):
 
 
 async def training_signal_check():
+    es = await setup_es_connection()
+
     def weighted_avg_and_std(values, weights):
         average = np.average(values, weights=weights)
         # Fast and numerically precise:
@@ -325,6 +327,20 @@ async def training_signal_check():
                 stable = True
 
                 training_start_ts_ns = time.time_ns()
+
+                drain_status_doc = {
+                    "num_log_clusters": num_drain_templates,
+                    "update_type": "training_signal",
+                    "timestamp": int(training_end_ts_ns / 1000000),
+                }
+                try:
+                    await es.index(
+                        index="opni-drain-model-status", body=drain_status_doc
+                    )
+                except Exception as e:
+                    logging.error(
+                        "Error when indexing status to opni-drain-model-status"
+                    )
 
 
 async def init_nats():
