@@ -4,7 +4,6 @@ import json
 import logging
 import math
 import os
-import time
 from asyncio.exceptions import TimeoutError
 from collections import deque
 
@@ -258,8 +257,8 @@ async def training_signal_check():
     num_templates_in_last_train = 0
     train_on_next_chance = True
     stable = False
-    training_start_ts_ns = time.time_ns()
-    very_first_ts_ns = training_start_ts_ns
+    training_start_ts_ms = int(pd.to_datetime("now", utc=True).timestamp() * 1000)
+    very_first_ts_ns = training_start_ts_ms
 
     normal_periods = []
 
@@ -294,18 +293,22 @@ async def training_signal_check():
 
             if (
                 weighted_vol < 0.199
-                and training_start_ts_ns != very_first_ts_ns
+                and training_start_ts_ms != very_first_ts_ns
                 and train_on_next_chance
             ):
-                training_start_ts_ns = time.time_ns()
+                training_start_ts_ms = int(
+                    pd.to_datetime("now", utc=True).timestamp() * 1000
+                )
 
             if weighted_vol > 0.155 and not train_on_next_chance and stable:
-                training_end_ts_ns = time.time_ns()
+                training_end_ts_ms = int(
+                    pd.to_datetime("now", utc=True).timestamp() * 1000
+                )
                 normal_periods.append(
-                    {"start_ts": training_start_ts_ns, "end_ts": training_end_ts_ns}
+                    {"start_ts": training_start_ts_ms, "end_ts": training_end_ts_ms}
                 )
                 stable = False
-                training_start_ts_ns = -1.0
+                training_start_ts_ms = -1.0
 
             if weighted_vol <= 0.15 and (
                 train_on_next_chance
@@ -313,25 +316,34 @@ async def training_signal_check():
             ):
                 num_templates_in_last_train = num_drain_templates
                 logging.info(f"SENDING TRAIN SIGNAL on iteration {iteration}")
-                if training_start_ts_ns != -1.0:
-                    training_end_ts_ns = time.time_ns()
+                if training_start_ts_ms != -1.0:
+                    training_end_ts_ms = int(
+                        pd.to_datetime("now", utc=True).timestamp() * 1000
+                    )
                     normal_periods.append(
-                        {"start_ts": training_start_ts_ns, "end_ts": training_end_ts_ns}
+                        {"start_ts": training_start_ts_ms, "end_ts": training_end_ts_ms}
                     )
                 train_payload = {
-                    "model_to_train": "nulog",
-                    "time_intervals": normal_periods,
+                    "start_ts": training_start_ts_ms,
+                    "end_ts": training_end_ts_ms,
                 }
+                try:
+                    await es.index(index="opni-normal-intervals", body=train_payload)
+                except Exception as e:
+                    logging.error("Error when indexing status to opni-normal-intervals")
+
                 await nw.publish("train", json.dumps(train_payload).encode())
                 train_on_next_chance = False
                 stable = True
 
-                training_start_ts_ns = time.time_ns()
+                training_start_ts_ms = int(
+                    pd.to_datetime("now", utc=True).timestamp() * 1000
+                )
 
                 drain_status_doc = {
                     "num_log_clusters": num_drain_templates,
                     "update_type": "training_signal",
-                    "timestamp": int(training_end_ts_ns / 1000000),
+                    "timestamp": training_end_ts_ms,
                 }
                 try:
                     await es.index(
