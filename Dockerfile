@@ -1,8 +1,5 @@
-FROM python:3.8-slim
+FROM rancher/opni-python-base:3.8
 WORKDIR /code
-
-COPY ./drain-service/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ./drain-service/drain_training_inferencing.py .
 COPY ./drain-service/drain3.ini .
