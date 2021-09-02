@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import time
 from asyncio.exceptions import TimeoutError
 from collections import deque
 
@@ -359,6 +360,23 @@ async def init_nats():
     logging.info("connecting to nats")
     await nw.connect()
 
+async def wait_for_index():
+    es = await setup_es_connection()
+    while True:
+        try:
+            exists = await es.indices.exists("opni-normal-intervals")
+            if exists:
+                break
+            else:
+                logging.info("waiting for opni-normal-intervals index")
+                time.sleep(2)
+
+        except TransportError as exception:
+            logging.info(f"Error in es indices {exception}")
+            if exception.status_code == "N/A":
+                logging.info("Elasticsearch connection error")
+                es = await setup_es_connection()
+
 
 if __name__ == "__main__":
     fail_keywords_str = ""
@@ -376,8 +394,13 @@ if __name__ == "__main__":
     model_to_save_queue = asyncio.Queue(loop=loop)
     logs_to_update_in_elasticsearch = asyncio.Queue(loop=loop)
 
-    task = loop.create_task(init_nats())
-    loop.run_until_complete(task)
+    # Run initialization tasks
+    loop.run_until_complete(
+        asyncio.gather(
+            init_nats(),
+            wait_for_index(),
+        )
+    )
 
     preprocessed_logs_consumer_coroutine = consume_logs(
         incoming_logs_to_train_queue, logs_to_update_in_elasticsearch
