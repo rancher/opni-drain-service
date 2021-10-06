@@ -104,10 +104,11 @@ async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
         df["drain_prediction"] = 0
         if not fail_keywords_str:
             fail_keywords_str = "a^"
+        df["drain_error_keyword"] = df["matched_template"].str.contains(fail_keywords_str, regex=True)
         df.loc[
             (df["drain_matched_template_support"] <= 10)
             & (df["drain_matched_template_support"] != 10)
-            | (df["matched_template"].str.contains(fail_keywords_str, regex=True)),
+            | (df["drain_error_keyword"] == True),
             "drain_prediction",
         ] = 1
         prediction_payload = (
@@ -117,10 +118,11 @@ async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
                     "drain_prediction",
                     "drain_matched_template_id",
                     "drain_matched_template_support",
+                    "drain_error_keyword",
                 ]
             ]
-            .to_json()
-            .encode()
+                .to_json()
+                .encode()
         )
         await nw.publish("anomalies", prediction_payload)
 
@@ -187,13 +189,13 @@ async def update_es_logs(queue):
             anomaly_df["script"] = script
             try:
                 async for ok, result in async_streaming_bulk(
-                    es,
-                    doc_generator_anomaly(
-                        anomaly_df[["_id", "_op_type", "_index", "script"]]
-                    ),
-                    max_retries=1,
-                    initial_backoff=1,
-                    request_timeout=5,
+                        es,
+                        doc_generator_anomaly(
+                            anomaly_df[["_id", "_op_type", "_index", "script"]]
+                        ),
+                        max_retries=1,
+                        initial_backoff=1,
+                        request_timeout=5,
                 ):
                     action, result = result.popitem()
                     if not ok:
@@ -214,21 +216,21 @@ async def update_es_logs(queue):
         try:
             # update normal logs in ES
             async for ok, result in async_streaming_bulk(
-                es,
-                doc_generator(
-                    df[
-                        [
-                            "_id",
-                            "_op_type",
-                            "_index",
-                            "drain_matched_template_id",
-                            "drain_matched_template_support",
+                    es,
+                    doc_generator(
+                        df[
+                            [
+                                "_id",
+                                "_op_type",
+                                "_index",
+                                "drain_matched_template_id",
+                                "drain_matched_template_support",
+                            ]
                         ]
-                    ]
-                ),
-                max_retries=1,
-                initial_backoff=1,
-                request_timeout=5,
+                    ),
+                    max_retries=1,
+                    initial_backoff=1,
+                    request_timeout=5,
             ):
                 action, result = result.popitem()
                 if not ok:
@@ -293,9 +295,9 @@ async def training_signal_check():
                 train_on_next_chance = True
 
             if (
-                weighted_vol < 0.199
-                and training_start_ts_ms != very_first_ts_ns
-                and train_on_next_chance
+                    weighted_vol < 0.199
+                    and training_start_ts_ms != very_first_ts_ns
+                    and train_on_next_chance
             ):
                 training_start_ts_ms = int(
                     pd.to_datetime("now", utc=True).timestamp() * 1000
@@ -312,8 +314,8 @@ async def training_signal_check():
                 training_start_ts_ms = -1.0
 
             if weighted_vol <= 0.15 and (
-                train_on_next_chance
-                or num_drain_templates > (2 * num_templates_in_last_train)
+                    train_on_next_chance
+                    or num_drain_templates > (2 * num_templates_in_last_train)
             ):
                 num_templates_in_last_train = num_drain_templates
                 logging.info(f"SENDING TRAIN SIGNAL on iteration {iteration}")
@@ -359,6 +361,7 @@ async def training_signal_check():
 async def init_nats():
     logging.info("connecting to nats")
     await nw.connect()
+
 
 async def wait_for_index():
     es = await setup_es_connection()
