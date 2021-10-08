@@ -28,11 +28,7 @@ ES_ENDPOINT = os.environ["ES_ENDPOINT"]
 ES_USERNAME = os.environ["ES_USERNAME"]
 ES_PASSWORD = os.environ["ES_PASSWORD"]
 if "RETRAIN_OFTEN" in os.environ:
-    RETRAIN_OFTEN = os.environ["RETRAIN_OFTEN"]
-    if RETRAIN_OFTEN == 'True':
-        RETRAIN_OFTEN = True
-    elif RETRAIN_OFTEN == 'False':
-        RETRAIN_OFTEN = False
+    RETRAIN_OFTEN = os.environ["RETRAIN_OFTEN"].lower() == "true"
 else:
     RETRAIN_OFTEN = False
 
