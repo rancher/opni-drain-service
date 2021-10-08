@@ -11,6 +11,7 @@ from collections import deque
 # Third Party
 import numpy as np
 import pandas as pd
+import ruptures as rpt
 from drain3.file_persistence import FilePersistence
 from drain3.template_miner import TemplateMiner
 from elasticsearch import AsyncElasticsearch, TransportError
@@ -26,10 +27,19 @@ template_miner = TemplateMiner(persistence)
 ES_ENDPOINT = os.environ["ES_ENDPOINT"]
 ES_USERNAME = os.environ["ES_USERNAME"]
 ES_PASSWORD = os.environ["ES_PASSWORD"]
+if "RETRAIN_OFTEN" in os.environ:
+    RETRAIN_OFTEN = os.environ["RETRAIN_OFTEN"]
+    if RETRAIN_OFTEN == 'True':
+        RETRAIN_OFTEN = True
+    elif RETRAIN_OFTEN == 'False':
+        RETRAIN_OFTEN = False
+else:
+    RETRAIN_OFTEN = False
+
 num_no_templates_change_tracking_queue = deque([], 50)
 num_templates_changed_tracking_queue = deque([], 50)
 num_clusters_created_tracking_queue = deque([], 50)
-num_total_clusters_tracking_queue = deque([], 50)
+num_total_clusters_tracking_queue = deque([], 200)
 
 nw = NatsWrapper()
 
@@ -258,6 +268,7 @@ async def training_signal_check():
 
     iteration = 0
     num_templates_in_last_train = 0
+    num_prev_breakpoints = 0
     train_on_next_chance = True
     stable = False
     training_start_ts_ms = int(pd.to_datetime("now", utc=True).timestamp() * 1000)
@@ -278,7 +289,25 @@ async def training_signal_check():
                 num_total_clusters_tracking_queue
             )
         )
-        num_clusters = np.array(num_total_clusters_tracking_queue)
+
+        if RETRAIN_OFTEN:
+            # more aggressive retraining
+            if len(list(num_total_clusters_tracking_queue)) > 10 and iteration % 180 == 0:
+                signal = np.array(list(reversed(num_total_clusters_tracking_queue)))
+                algo = rpt.Pelt(model="l1").fit(signal)
+                my_bkps = algo.predict(pen=100)
+                logging.info(f"breakpoints = {my_bkps}")
+                if len(my_bkps) > 1 and len(my_bkps) != num_prev_breakpoints:
+                    num_prev_breakpoints = len(my_bkps)
+                    logging.info(f"num_prev_breakpoints = {num_prev_breakpoints}")
+                    # calculate start_ts based on last change point
+                    training_start_ts_ms = pd.to_datetime("now", utc=True).timestamp() * 1000 - my_bkps[-2] * 20000 + 20000
+                    very_first_ts_ns = training_start_ts_ms
+                    num_total_clusters_tracking_queue.rotate(my_bkps[-2]*-1)
+                    train_on_next_chance = True
+                    stable = False
+
+        num_clusters = np.array(num_total_clusters_tracking_queue)[:50]
         vol = np.std(num_clusters) / np.mean(num_clusters[:10])
         time_steps = num_clusters.shape[0]
         weights = np.flip(np.true_divide(np.arange(1, time_steps + 1), time_steps))
@@ -290,7 +319,7 @@ async def training_signal_check():
             )
         )
 
-        if len(num_total_clusters_tracking_queue) > 3:
+        if len(num_total_clusters_tracking_queue) > 30:
             if weighted_vol >= 0.199:
                 train_on_next_chance = True
 
