@@ -11,6 +11,7 @@ from collections import deque
 # Third Party
 import numpy as np
 import pandas as pd
+import ruptures as rpt
 from drain3.file_persistence import FilePersistence
 from drain3.template_miner import TemplateMiner
 from elasticsearch import AsyncElasticsearch, TransportError
@@ -26,10 +27,15 @@ template_miner = TemplateMiner(persistence)
 ES_ENDPOINT = os.environ["ES_ENDPOINT"]
 ES_USERNAME = os.environ["ES_USERNAME"]
 ES_PASSWORD = os.environ["ES_PASSWORD"]
+if "RETRAIN_OFTEN" in os.environ:
+    RETRAIN_OFTEN = os.environ["RETRAIN_OFTEN"].lower() == "true"
+else:
+    RETRAIN_OFTEN = False
+
 num_no_templates_change_tracking_queue = deque([], 50)
 num_templates_changed_tracking_queue = deque([], 50)
 num_clusters_created_tracking_queue = deque([], 50)
-num_total_clusters_tracking_queue = deque([], 50)
+num_total_clusters_tracking_queue = deque([], 200)
 
 nw = NatsWrapper()
 
@@ -104,10 +110,11 @@ async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
         df["drain_prediction"] = 0
         if not fail_keywords_str:
             fail_keywords_str = "a^"
+        df["drain_error_keyword"] = df["matched_template"].str.contains(fail_keywords_str, regex=True)
         df.loc[
             (df["drain_matched_template_support"] <= 10)
             & (df["drain_matched_template_support"] != 10)
-            | (df["matched_template"].str.contains(fail_keywords_str, regex=True)),
+            | (df["drain_error_keyword"] == True),
             "drain_prediction",
         ] = 1
         prediction_payload = (
@@ -117,10 +124,11 @@ async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
                     "drain_prediction",
                     "drain_matched_template_id",
                     "drain_matched_template_support",
+                    "drain_error_keyword",
                 ]
             ]
-            .to_json()
-            .encode()
+                .to_json()
+                .encode()
         )
         await nw.publish("anomalies", prediction_payload)
 
@@ -187,13 +195,13 @@ async def update_es_logs(queue):
             anomaly_df["script"] = script
             try:
                 async for ok, result in async_streaming_bulk(
-                    es,
-                    doc_generator_anomaly(
-                        anomaly_df[["_id", "_op_type", "_index", "script"]]
-                    ),
-                    max_retries=1,
-                    initial_backoff=1,
-                    request_timeout=5,
+                        es,
+                        doc_generator_anomaly(
+                            anomaly_df[["_id", "_op_type", "_index", "script"]]
+                        ),
+                        max_retries=1,
+                        initial_backoff=1,
+                        request_timeout=5,
                 ):
                     action, result = result.popitem()
                     if not ok:
@@ -214,21 +222,21 @@ async def update_es_logs(queue):
         try:
             # update normal logs in ES
             async for ok, result in async_streaming_bulk(
-                es,
-                doc_generator(
-                    df[
-                        [
-                            "_id",
-                            "_op_type",
-                            "_index",
-                            "drain_matched_template_id",
-                            "drain_matched_template_support",
+                    es,
+                    doc_generator(
+                        df[
+                            [
+                                "_id",
+                                "_op_type",
+                                "_index",
+                                "drain_matched_template_id",
+                                "drain_matched_template_support",
+                            ]
                         ]
-                    ]
-                ),
-                max_retries=1,
-                initial_backoff=1,
-                request_timeout=5,
+                    ),
+                    max_retries=1,
+                    initial_backoff=1,
+                    request_timeout=5,
             ):
                 action, result = result.popitem()
                 if not ok:
@@ -256,6 +264,7 @@ async def training_signal_check():
 
     iteration = 0
     num_templates_in_last_train = 0
+    num_prev_breakpoints = 0
     train_on_next_chance = True
     stable = False
     training_start_ts_ms = int(pd.to_datetime("now", utc=True).timestamp() * 1000)
@@ -276,7 +285,25 @@ async def training_signal_check():
                 num_total_clusters_tracking_queue
             )
         )
-        num_clusters = np.array(num_total_clusters_tracking_queue)
+
+        if RETRAIN_OFTEN:
+            # more aggressive retraining
+            if len(list(num_total_clusters_tracking_queue)) > 10 and iteration % 180 == 0:
+                signal = np.array(list(reversed(num_total_clusters_tracking_queue)))
+                algo = rpt.Pelt(model="l1").fit(signal)
+                my_bkps = algo.predict(pen=100)
+                logging.info(f"breakpoints = {my_bkps}")
+                if len(my_bkps) > 1 and len(my_bkps) != num_prev_breakpoints:
+                    num_prev_breakpoints = len(my_bkps)
+                    logging.info(f"num_prev_breakpoints = {num_prev_breakpoints}")
+                    # calculate start_ts based on last change point
+                    training_start_ts_ms = pd.to_datetime("now", utc=True).timestamp() * 1000 - my_bkps[-2] * 20000 + 20000
+                    very_first_ts_ns = training_start_ts_ms
+                    num_total_clusters_tracking_queue.rotate(my_bkps[-2]*-1)
+                    train_on_next_chance = True
+                    stable = False
+
+        num_clusters = np.array(num_total_clusters_tracking_queue)[:50]
         vol = np.std(num_clusters) / np.mean(num_clusters[:10])
         time_steps = num_clusters.shape[0]
         weights = np.flip(np.true_divide(np.arange(1, time_steps + 1), time_steps))
@@ -288,14 +315,14 @@ async def training_signal_check():
             )
         )
 
-        if len(num_total_clusters_tracking_queue) > 3:
+        if len(num_total_clusters_tracking_queue) > 30:
             if weighted_vol >= 0.199:
                 train_on_next_chance = True
 
             if (
-                weighted_vol < 0.199
-                and training_start_ts_ms != very_first_ts_ns
-                and train_on_next_chance
+                    weighted_vol < 0.199
+                    and training_start_ts_ms != very_first_ts_ns
+                    and train_on_next_chance
             ):
                 training_start_ts_ms = int(
                     pd.to_datetime("now", utc=True).timestamp() * 1000
@@ -312,8 +339,8 @@ async def training_signal_check():
                 training_start_ts_ms = -1.0
 
             if weighted_vol <= 0.15 and (
-                train_on_next_chance
-                or num_drain_templates > (2 * num_templates_in_last_train)
+                    train_on_next_chance
+                    or num_drain_templates > (2 * num_templates_in_last_train)
             ):
                 num_templates_in_last_train = num_drain_templates
                 logging.info(f"SENDING TRAIN SIGNAL on iteration {iteration}")
@@ -359,6 +386,7 @@ async def training_signal_check():
 async def init_nats():
     logging.info("connecting to nats")
     await nw.connect()
+
 
 async def wait_for_index():
     es = await setup_es_connection()
