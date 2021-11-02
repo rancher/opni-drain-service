@@ -212,7 +212,7 @@ async def update_es_logs(queue):
                     "Failed to index data. Re-adding to logs_to_update_in_elasticsearch queue"
                 )
                 logging.error(exception)
-                queue.put(anomaly_df)
+                await queue.put(anomaly_df)
             except TransportError as exception:
                 logging.info(f"Error in async_streaming_bulk {exception}")
                 if exception.status_code == "N/A":
