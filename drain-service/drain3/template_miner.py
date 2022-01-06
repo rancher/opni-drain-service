@@ -156,7 +156,7 @@ class TemplateMiner:
         :param log_message: log message to match
         :return: Matched cluster or None of no match found.
         """
-        matched_cluster = self.drain.match(masked_content)
+        matched_cluster = self.drain.match(log_message)
         return matched_cluster
 
     def get_parameter_list(self, log_template: str, content: str):
