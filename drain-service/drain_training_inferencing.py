@@ -245,7 +245,7 @@ async def update_es_logs(queue):
         except (BulkIndexError, ConnectionTimeout) as exception:
             logging.error("Failed to index data")
             logging.error(exception)
-            queue.put(df)
+            await queue.put(df)
         except TransportError as exception:
             logging.info(f"Error in async_streaming_bulk {exception}")
             if exception.status_code == "N/A":
@@ -406,7 +406,7 @@ async def wait_for_index():
                 es = await setup_es_connection()
 
 
-if __name__ == "__main__":
+def main():
     fail_keywords_str = ""
     for fail_keyword in os.environ["FAIL_KEYWORDS"].split(","):
         if not fail_keyword:

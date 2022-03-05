@@ -4,6 +4,7 @@ Adopted from https://github.com/IBM/Drain3
 # Standard Library
 import base64
 import logging
+import pathlib
 import re
 import time
 import zlib
@@ -62,10 +63,13 @@ class TemplateMiner:
         if persistence_handler is not None:
             self.load_state()
 
-    def load_state(self):
+    def load_state(self, control_plane_binary_path=None):
         logger.info("Checking for saved state")
-
-        state = self.persistence_handler.load_state()
+        state = None
+        if control_plane_binary_path:
+            state = pathlib.Path(control_plane_binary_path).read_bytes()
+        else:
+            state = self.persistence_handler.load_state()
         if state is None:
             logger.info("Saved state not found")
             return
