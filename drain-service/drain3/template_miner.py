@@ -153,6 +153,9 @@ class TemplateMiner:
         return result
 
     def add_log_template(self, log_template: str) -> dict:
+        """
+        Creates a unique log template cluster for every message passed to the function.
+        """
         self.profiler.start_section("total")
 
         self.profiler.start_section("drain")

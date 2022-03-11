@@ -323,6 +323,9 @@ class Drain:
         return match_cluster, update_type
 
     def add_log_template(self, content: str):
+        """
+        Creates a unique log template for every log message passed to the function.
+        """
         content_tokens = self.get_content_as_tokens(content)
         if self.profiler:
             self.profiler.start_section("create_cluster")
