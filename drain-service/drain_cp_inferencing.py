@@ -22,7 +22,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(messa
 persistence = FilePersistence("drain3_state.bin")
 workload_template_miner = TemplateMiner(persistence)
 cp_template_miner = TemplateMiner()
-cp_predictions = dict()
 ES_ENDPOINT = os.environ["ES_ENDPOINT"]
 ES_USERNAME = os.environ["ES_USERNAME"]
 ES_PASSWORD = os.environ["ES_PASSWORD"]
