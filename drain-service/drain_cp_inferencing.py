@@ -19,8 +19,6 @@ from opni_nats import NatsWrapper
 pd.set_option("mode.chained_assignment", None)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
-persistence = FilePersistence("drain3_state.bin")
-workload_template_miner = TemplateMiner(persistence)
 cp_template_miner = TemplateMiner()
 ES_ENDPOINT = os.environ["ES_ENDPOINT"]
 ES_USERNAME = os.environ["ES_USERNAME"]
