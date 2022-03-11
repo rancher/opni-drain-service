@@ -322,6 +322,21 @@ class Drain:
 
         return match_cluster, update_type
 
+    def add_log_template(self, content: str):
+        content_tokens = self.get_content_as_tokens(content)
+        if self.profiler:
+            self.profiler.start_section("create_cluster")
+        self.clusters_counter += 1
+        cluster_id = self.clusters_counter
+        match_cluster = LogCluster(content_tokens, cluster_id)
+        self.id_to_cluster[cluster_id] = match_cluster
+        self.add_seq_to_prefix_tree(self.root_node, match_cluster)
+
+        if self.profiler:
+            self.profiler.end_section()
+
+        return match_cluster
+
     def match(self, content: str):
         """
         Match against an already existing cluster. Match shall be perfect (sim_th=1.0).

@@ -152,6 +152,31 @@ class TemplateMiner:
         self.profiler.report(self.config.profiling_report_sec)
         return result
 
+    def add_log_template(self, log_template: str) -> dict:
+        self.profiler.start_section("total")
+
+        self.profiler.start_section("drain")
+        cluster = self.drain.add_log_template(log_template)
+        self.profiler.end_section("drain")
+        result = {
+            "cluster_id": cluster.cluster_id,
+            "cluster_size": cluster.size,
+            "template_mined": cluster.get_template(),
+            "cluster_count": len(self.drain.clusters),
+        }
+
+        if self.persistence_handler is not None:
+            self.profiler.start_section("save_state")
+            snapshot_reason = self.get_snapshot_reason("cluster_created", cluster.cluster_id)
+            if snapshot_reason:
+                self.save_state(snapshot_reason)
+                self.last_save_time = time.time()
+            self.profiler.end_section()
+
+        self.profiler.end_section("total")
+        self.profiler.report(self.config.profiling_report_sec)
+        return result
+
     def match(self, log_message: str) -> LogCluster:
 
         """

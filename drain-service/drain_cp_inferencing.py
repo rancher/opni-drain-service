@@ -29,21 +29,28 @@ ES_PASSWORD = os.environ["ES_PASSWORD"]
 
 nw = NatsWrapper()
 
-async def load_pretrain_model():
-    # This function will load the pretrained DRAIN model for control plane logs in addition to the anomaly level for each template.
-    drain_model_url = "https://opni-public.s3.us-east-2.amazonaws.com/pretrain-drain-cp-models/drain3_control_plane_model.bin"
+def load_pretrained_model_anomaly_levels():
+    # This function will load the anomaly levels of the templates from the pretrained DRAIN model.
+    cp_predictions = dict()
     drain_preds_url = "https://opni-public.s3.us-east-2.amazonaws.com/pretrain-drain-cp-models/drain3_control_plane_preds.json"
-    global cp_predictions
     try:
-        urllib.request.urlretrieve(drain_model_url, "drain3_control_plane_model.bin")
         urllib.request.urlretrieve(drain_preds_url, "drain3_control_plane_preds.json")
-        logging.info("Successfully able to retrieve the control plane model and its corresponding predictions.")
-        cp_template_miner.load_state("drain3_control_plane_model.bin")
-        logging.info("Able to load the DRAIN control plane model with {} clusters.".format(cp_template_miner.drain.clusters_counter))
-
         with open("drain3_control_plane_preds.json","r") as cp_preds:
             cp_predictions = json.load(cp_preds)
         logging.info("Able to load the control plane predictions for the {} clusters".format(len(cp_predictions)))
+        return cp_predictions
+    except Exception as e:
+        logging.error(e)
+        return cp_predictions
+
+async def load_pretrain_model():
+    # This function will load the pretrained DRAIN model for control plane logs in addition to the anomaly level for each template.
+    drain_model_url = "https://opni-public.s3.us-east-2.amazonaws.com/pretrain-drain-cp-models/drain3_control_plane_model.bin"
+    try:
+        urllib.request.urlretrieve(drain_model_url, "drain3_control_plane_model.bin")
+        logging.info("Successfully able to retrieve the control plane model and its corresponding predictions.")
+        cp_template_miner.load_state("drain3_control_plane_model.bin")
+        logging.info("Able to load the DRAIN control plane model with {} clusters.".format(cp_template_miner.drain.clusters_counter))
         return True
     except Exception as e:
         logging.error(f"Unable to load DRAIN model {e}")
@@ -80,7 +87,7 @@ async def inference_cp_logs(incoming_cp_logs_queue):
         This function will be inferencing on logs which are sent over through Nats and using the DRAIN model to match the logs to a template.
         If no match is made, the log is then sent over to be inferenced on by the Nulog Deep Learning model.
     '''
-    global cp_predictions
+    cp_predictions = load_pretrained_model_anomaly_levels()
     while True:
         cp_logs_df = await incoming_cp_logs_queue.get()
         start_time = time.time()
@@ -136,21 +143,14 @@ async def update_es_logs(queue):
     # This function will be updating Opensearch logs which were inferred on by the DRAIN model.
     es = await setup_es_connection()
 
-    async def doc_generator_anomaly(df):
-        for index, document in df.iterrows():
-            doc_dict = document.to_dict()
-            doc_dict["doc"] = {}
-            doc_dict["doc"]["anomaly_level"] = doc_dict["anomaly_level"]
-            doc_dict["doc"]["drain_control_plane_template_matched"] = doc_dict["drain_control_plane_template_matched"]
-            del doc_dict["anomaly_level"]
-            del doc_dict["drain_control_plane_template_matched"]
-            yield doc_dict
-
     async def doc_generator(df):
         for index, document in df.iterrows():
             doc_dict = document.to_dict()
             doc_dict["doc"] = {}
             doc_dict["doc"]["drain_control_plane_template_matched"] = doc_dict["drain_control_plane_template_matched"]
+            if "anomaly_level" in doc_dict:
+                doc_dict["doc"]["anomaly_level"] = doc_dict["anomaly_level"]
+                del doc_dict["anomaly_level"]
             del doc_dict["drain_control_plane_template_matched"]
             yield doc_dict
 
@@ -158,8 +158,7 @@ async def update_es_logs(queue):
         df = await queue.get()
         df["_op_type"] = "update"
         df["_index"] = "logs"
-
-        # update anomaly_predicted_count and anomaly_level for anomalous logs
+        normal_df = df[df["anomaly_level"] == "Normal"]
         anomaly_df = df[df["anomaly_level"] == "Anomaly"]
         if len(anomaly_df) == 0:
             logging.info("No anomalies in this payload")
@@ -167,7 +166,7 @@ async def update_es_logs(queue):
             try:
                 async for ok, result in async_streaming_bulk(
                         es,
-                        doc_generator_anomaly(
+                        doc_generator(
                             anomaly_df[["_id", "_op_type", "_index", "drain_control_plane_template_matched", "anomaly_level"]]
                         ),
                         max_retries=1,
@@ -195,7 +194,7 @@ async def update_es_logs(queue):
             async for ok, result in async_streaming_bulk(
                     es,
                     doc_generator(
-                        df[
+                        normal_df[
                             [
                                 "_id",
                                 "_op_type",
@@ -211,7 +210,7 @@ async def update_es_logs(queue):
                 action, result = result.popitem()
                 if not ok:
                     logging.error("failed to {} document {}".format())
-            logging.info(f"Updated {len(df)} logs in ES")
+            logging.info(f"Updated {len(normal_df)} normal logs in ES")
         except (BulkIndexError, ConnectionTimeout) as exception:
             logging.error("Failed to index data")
             logging.error(exception)
