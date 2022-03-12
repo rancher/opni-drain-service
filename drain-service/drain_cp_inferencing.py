@@ -73,7 +73,7 @@ async def consume_logs(incoming_cp_logs_queue, logs_to_update_es_cp):
     )
 
     await nw.subscribe(
-        nats_subject="anomalies",
+        nats_subject="anomalies_control_plane",
         nats_queue="workers",
         payload_queue=logs_to_update_es_cp,
         subscribe_handler=anomalies_subscription_handler,
@@ -106,7 +106,7 @@ async def inference_cp_logs(incoming_cp_logs_queue):
                     nulog_logs.append(row_dict)
         if len(logs_inferenced_results) > 0:
             logs_inferenced_drain_df = (pd.DataFrame(logs_inferenced_results).to_json().encode())
-            await nw.publish("anomalies", logs_inferenced_drain_df)
+            await nw.publish("anomalies_control_plane", logs_inferenced_drain_df)
         if len(nulog_logs) > 0:
             nulog_logs_df = pd.DataFrame(nulog_logs).to_json().encode()
             await nw.publish("nulog_cp_logs", nulog_logs_df)
