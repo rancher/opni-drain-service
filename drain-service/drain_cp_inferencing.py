@@ -227,6 +227,20 @@ async def init_nats():
 async def wait_for_index():
     # This function is used to setup the Opensearch connection.
     es = await setup_es_connection()
+    while True:
+        try:
+            exists = await es.indices.exists("logs")
+            if exists:
+                break
+            else:
+                logging.info("waiting for logs index")
+                time.sleep(2)
+
+        except TransportError as exception:
+            logging.info(f"Error in es indices {exception}")
+            if exception.status_code == "N/A":
+                logging.info("Elasticsearch connection error")
+                es = await setup_es_connection()
 
 def main():
     loop = asyncio.get_event_loop()
