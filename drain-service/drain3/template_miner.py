@@ -4,6 +4,7 @@ Adopted from https://github.com/IBM/Drain3
 # Standard Library
 import base64
 import logging
+import pathlib
 import re
 import time
 import zlib
@@ -62,10 +63,13 @@ class TemplateMiner:
         if persistence_handler is not None:
             self.load_state()
 
-    def load_state(self):
+    def load_state(self, control_plane_binary_path=None):
         logger.info("Checking for saved state")
-
-        state = self.persistence_handler.load_state()
+        state = None
+        if control_plane_binary_path:
+            state = pathlib.Path(control_plane_binary_path).read_bytes()
+        else:
+            state = self.persistence_handler.load_state()
         if state is None:
             logger.info("Saved state not found")
             return
@@ -139,6 +143,34 @@ class TemplateMiner:
         if self.persistence_handler is not None:
             self.profiler.start_section("save_state")
             snapshot_reason = self.get_snapshot_reason(change_type, cluster.cluster_id)
+            if snapshot_reason:
+                self.save_state(snapshot_reason)
+                self.last_save_time = time.time()
+            self.profiler.end_section()
+
+        self.profiler.end_section("total")
+        self.profiler.report(self.config.profiling_report_sec)
+        return result
+
+    def add_log_template(self, log_template: str) -> dict:
+        """
+        Creates a unique log template cluster for every message passed to the function.
+        """
+        self.profiler.start_section("total")
+
+        self.profiler.start_section("drain")
+        cluster = self.drain.add_log_template(log_template)
+        self.profiler.end_section("drain")
+        result = {
+            "cluster_id": cluster.cluster_id,
+            "cluster_size": cluster.size,
+            "template_mined": cluster.get_template(),
+            "cluster_count": len(self.drain.clusters),
+        }
+
+        if self.persistence_handler is not None:
+            self.profiler.start_section("save_state")
+            snapshot_reason = self.get_snapshot_reason("cluster_created", cluster.cluster_id)
             if snapshot_reason:
                 self.save_state(snapshot_reason)
                 self.last_save_time = time.time()
