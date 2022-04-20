@@ -29,9 +29,9 @@ nw = NatsWrapper()
 def load_pretrained_model_anomaly_levels():
     # This function will load the anomaly levels of the templates from the pretrained DRAIN model.
     cp_predictions = dict()
-    drain_preds_url = "https://opni-public.s3.us-east-2.amazonaws.com/pretrain-drain-cp-models/drain3_control_plane_preds.json"
+    drain_preds_url = "https://opni-public.s3.us-east-2.amazonaws.com/pretrain-drain-cp-models/drain3_control_plane_preds_v0.4.1.json"
     try:
-        urllib.request.urlretrieve(drain_preds_url, "drain3_control_plane_preds.json")
+        urllib.request.urlretrieve(drain_preds_url, "drain3_control_plane_preds_v0.4.1.json")
         with open("drain3_control_plane_preds.json","r") as cp_preds:
             cp_predictions = json.load(cp_preds)
         logging.info("Able to load the control plane predictions for the {} clusters".format(len(cp_predictions)))
@@ -42,9 +42,9 @@ def load_pretrained_model_anomaly_levels():
 
 async def load_pretrain_model():
     # This function will load the pretrained DRAIN model for control plane logs in addition to the anomaly level for each template.
-    drain_model_url = "https://opni-public.s3.us-east-2.amazonaws.com/pretrain-drain-cp-models/drain3_control_plane_model.bin"
+    drain_model_url = "https://opni-public.s3.us-east-2.amazonaws.com/pretrain-drain-cp-models/drain3_control_plane_model_v0.4.1.bin"
     try:
-        urllib.request.urlretrieve(drain_model_url, "drain3_control_plane_model.bin")
+        urllib.request.urlretrieve(drain_model_url, "drain3_control_plane_model_v0.4.1.bin")
         logging.info("Successfully able to retrieve the control plane model and its corresponding predictions.")
         cp_template_miner.load_state("drain3_control_plane_model.bin")
         logging.info("Able to load the DRAIN control plane model with {} clusters.".format(cp_template_miner.drain.clusters_counter))
