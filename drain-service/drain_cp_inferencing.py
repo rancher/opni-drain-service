@@ -26,27 +26,10 @@ ES_PASSWORD = os.environ["ES_PASSWORD"]
 
 nw = NatsWrapper()
 
-def load_pretrained_model_anomaly_levels():
-    # This function will load the anomaly levels of the templates from the pretrained DRAIN model.
-    cp_predictions = dict()
-    drain_preds_url = "https://opni-public.s3.us-east-2.amazonaws.com/pretrain-drain-cp-models/drain3_control_plane_preds_v0.4.1.json"
-    try:
-        urllib.request.urlretrieve(drain_preds_url, "drain3_control_plane_preds_v0.4.1.json")
-        with open("drain3_control_plane_preds.json","r") as cp_preds:
-            cp_predictions = json.load(cp_preds)
-        logging.info("Able to load the control plane predictions for the {} clusters".format(len(cp_predictions)))
-        return cp_predictions
-    except Exception as e:
-        logging.error(e)
-        return cp_predictions
-
 async def load_pretrain_model():
     # This function will load the pretrained DRAIN model for control plane logs in addition to the anomaly level for each template.
-    drain_model_url = "https://opni-public.s3.us-east-2.amazonaws.com/pretrain-drain-cp-models/drain3_control_plane_model_v0.4.1.bin"
     try:
-        urllib.request.urlretrieve(drain_model_url, "drain3_control_plane_model_v0.4.1.bin")
-        logging.info("Successfully able to retrieve the control plane model and its corresponding predictions.")
-        cp_template_miner.load_state("drain3_control_plane_model.bin")
+        cp_template_miner.load_state("drain3_control_plane_model_v0.4.1.bin")
         logging.info("Able to load the DRAIN control plane model with {} clusters.".format(cp_template_miner.drain.clusters_counter))
         return True
     except Exception as e:
@@ -82,35 +65,32 @@ async def consume_logs(incoming_cp_logs_queue, logs_to_update_es_cp):
 async def inference_cp_logs(incoming_cp_logs_queue):
     '''
         This function will be inferencing on logs which are sent over through Nats and using the DRAIN model to match the logs to a template.
-        If no match is made, the log is then sent over to be inferenced on by the Nulog Deep Learning model.
+        If no match is made, the log is then sent over to be inferenced on by the Deep Learning model.
     '''
-    cp_predictions = load_pretrained_model_anomaly_levels()
     while True:
         cp_logs_df = await incoming_cp_logs_queue.get()
         start_time = time.time()
         logging.info("Received payload of size {}".format(len(cp_logs_df)))
         logs_inferenced_results = []
-        nulog_logs = []
+        model_logs = []
         for index, row in cp_logs_df.iterrows():
             log_message = row["masked_log"]
             if log_message:
                 row_dict = row.to_dict()
-                result = cp_template_miner.match(log_message)
-                if result:
-                    result_template = result.get_template()
-                    prediction = cp_predictions[result_template]
-                    row_dict["anomaly_level"] = prediction
-                    row_dict["drain_control_plane_template_matched"] = result_template
+                template, anomaly_level = cp_template_miner.match(log_message)
+                if template:
+                    row_dict["anomaly_level"] = anomaly_level
+                    row_dict["drain_control_plane_template_matched"] = template.get_template()
                     logs_inferenced_results.append(row_dict)
                 else:
-                    nulog_logs.append(row_dict)
+                    model_logs.append(row_dict)
         if len(logs_inferenced_results) > 0:
             logs_inferenced_drain_df = (pd.DataFrame(logs_inferenced_results).to_json().encode())
             await nw.publish("anomalies_control_plane", logs_inferenced_drain_df)
-        if len(nulog_logs) > 0:
-            nulog_logs_df = pd.DataFrame(nulog_logs).to_json().encode()
-            await nw.publish("nulog_cp_logs", nulog_logs_df)
-            logging.info(f"Published {len(nulog_logs)} logs to be inferenced on by Nulog.")
+        if len(model_logs) > 0:
+            model_logs_df = pd.DataFrame(model_logs).to_json().encode()
+            await nw.publish("opnilog_cp_logs", model_logs_df)
+            logging.info(f"Published {len(model_logs)} logs to be inferenced on by Deep Learning model.")
         logging.info(f"{len(cp_logs_df)} logs processed in {(time.time() - start_time)} second(s)")
 
 
