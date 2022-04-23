@@ -1,15 +1,13 @@
 # Standard Library
 import asyncio
-import json
+from asyncio.exceptions import TimeoutError
 import logging
 import os
-import urllib.request
-from asyncio.exceptions import TimeoutError
+import sys
 import time
 
 # Third Party
 import pandas as pd
-from drain3.file_persistence import FilePersistence
 from drain3.template_miner import TemplateMiner
 from elasticsearch import AsyncElasticsearch, TransportError
 from elasticsearch.exceptions import ConnectionTimeout
@@ -236,7 +234,9 @@ def main():
     )
 
     init_model_task = loop.create_task(load_pretrain_model())
-    loop.run_until_complete(init_model_task)
+    model_loaded = loop.run_until_complete(init_model_task)
+    if not model_loaded:
+        sys.exit(1)
 
     preprocessed_logs_consumer_coroutine = consume_logs(
         incoming_cp_logs_queue, cp_logs_to_update_in_elasticsearch
