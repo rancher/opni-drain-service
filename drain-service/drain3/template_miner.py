@@ -4,8 +4,8 @@ Adopted from https://github.com/IBM/Drain3
 # Standard Library
 import base64
 import logging
-import pathlib
 import re
+import pathlib
 import time
 import zlib
 
@@ -30,7 +30,6 @@ class TemplateMiner:
     ):
         """
         Wrapper for Drain with persistence and masking support
-
         :param persistence_handler: The type of persistence to use. When None, no persistence is applied.
         :param config: Configuration object. When none, configuration is loaded from default .ini file (if exist)
         """
@@ -152,14 +151,11 @@ class TemplateMiner:
         self.profiler.report(self.config.profiling_report_sec)
         return result
 
-    def add_log_template(self, log_template: str) -> dict:
-        """
-        Creates a unique log template cluster for every message passed to the function.
-        """
+    def add_log_template(self, log_template: str, anomaly_level: str) -> dict:
         self.profiler.start_section("total")
 
         self.profiler.start_section("drain")
-        cluster = self.drain.add_log_template(log_template)
+        cluster = self.drain.add_log_template(log_template, anomaly_level)
         self.profiler.end_section("drain")
         result = {
             "cluster_id": cluster.cluster_id,
@@ -188,8 +184,7 @@ class TemplateMiner:
         :param log_message: log message to match
         :return: Matched cluster or None of no match found.
         """
-        matched_cluster = self.drain.match(log_message)
-        return matched_cluster
+        return self.drain.match(log_message)
 
     def get_parameter_list(self, log_template: str, content: str):
         escaped_prefix = re.escape(self.config.mask_prefix)

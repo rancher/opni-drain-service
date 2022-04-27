@@ -10,15 +10,19 @@ from drain3.simple_profiler import NullProfiler, Profiler
 
 
 class LogCluster:
-    __slots__ = ["log_template_tokens", "cluster_id", "size"]
+    __slots__ = ["log_template_tokens", "cluster_id", "anomaly_level","size"]
 
-    def __init__(self, log_template_tokens: list, cluster_id: int):
+    def __init__(self, log_template_tokens: list, cluster_id: int, anomaly_level="Normal"):
         self.log_template_tokens = tuple(log_template_tokens)
         self.cluster_id = cluster_id
+        self.anomaly_level = anomaly_level
         self.size = 1
 
     def get_template(self):
         return " ".join(self.log_template_tokens)
+
+    def get_anomaly_level(self):
+        return self.anomaly_level
 
     def __str__(self):
         return f"ID={str(self.cluster_id).ljust(5)} : size={str(self.size).ljust(10)}: {self.get_template()}"
@@ -322,16 +326,13 @@ class Drain:
 
         return match_cluster, update_type
 
-    def add_log_template(self, content: str):
-        """
-        Creates a unique log template for every log message passed to the function.
-        """
+    def add_log_template(self, content: str, anomaly_level: str):
         content_tokens = self.get_content_as_tokens(content)
         if self.profiler:
             self.profiler.start_section("create_cluster")
         self.clusters_counter += 1
         cluster_id = self.clusters_counter
-        match_cluster = LogCluster(content_tokens, cluster_id)
+        match_cluster = LogCluster(content_tokens, cluster_id, anomaly_level)
         self.id_to_cluster[cluster_id] = match_cluster
         self.add_seq_to_prefix_tree(self.root_node, match_cluster)
 
@@ -349,7 +350,9 @@ class Drain:
         """
         content_tokens = self.get_content_as_tokens(content)
         match_cluster = self.tree_search(self.root_node, content_tokens, 1.0, True)
-        return match_cluster
+        if match_cluster:
+            return match_cluster, match_cluster.get_anomaly_level()
+        return None, None
 
     def get_total_cluster_size(self):
         size = 0
