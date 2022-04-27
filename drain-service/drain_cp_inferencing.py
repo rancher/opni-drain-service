@@ -39,12 +39,12 @@ async def consume_logs(incoming_cp_logs_queue, logs_to_update_es_cp):
     async def subscribe_handler(msg):
         payload_data = msg.data.decode()
         await incoming_cp_logs_queue.put(
-            pd.read_json(payload_data, dtype={"_id": object})
+            pd.read_json(payload_data, dtype={"_id": object, "cluster_id": str})
         )
 
     async def anomalies_subscription_handler(msg):
         anomalies_data = msg.data.decode()
-        await logs_to_update_es_cp.put(pd.read_json(anomalies_data, dtype={"_id": object}))
+        await logs_to_update_es_cp.put(pd.read_json(anomalies_data, dtype={"_id": object, "cluster_id": str}))
 
     await nw.subscribe(
         nats_subject="preprocessed_logs_control_plane",
