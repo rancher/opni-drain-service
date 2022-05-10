@@ -92,11 +92,11 @@ async def inference_logs(incoming_logs_queue):
         if len(cp_model_logs) > 0:
             model_logs_df = pd.DataFrame(cp_model_logs).to_json().encode()
             await nw.publish("opnilog_cp_logs", model_logs_df)
-            logging.info(f"Published {len(cp_model_logs)} logs to be inferenced on by Deep Learning model.")
+            logging.info(f"Published {len(cp_model_logs)} logs to be inferenced on by Control Plane Deep Learning model.")
         if len(rancher_model_logs) > 0:
             rancher_logs_df = pd.DataFrame(rancher_model_logs).to_json().encode()
             await nw.publish("opnilog_rancher_logs", rancher_logs_df)
-            logging.info(f"Published {len(rancher_model_logs)} logs to be inferenced on by Deep Learning model.")
+            logging.info(f"Published {len(rancher_model_logs)} logs to be inferenced on by Rancher Deep Learning model.")
         logging.info(f"{len(logs_df)} logs processed in {(time.time() - start_time)} second(s)")
 
 
