@@ -350,9 +350,7 @@ class Drain:
         """
         content_tokens = self.get_content_as_tokens(content)
         match_cluster = self.tree_search(self.root_node, content_tokens, 1.0, True)
-        if match_cluster:
-            return match_cluster, match_cluster.get_anomaly_level()
-        return None, None
+        return match_cluster
 
     def get_total_cluster_size(self):
         size = 0
