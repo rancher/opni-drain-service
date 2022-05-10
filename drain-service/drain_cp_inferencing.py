@@ -54,7 +54,7 @@ async def consume_logs(incoming_cp_logs_queue, logs_to_update_es_cp):
     )
 
     await nw.subscribe(
-        nats_subject="anomalies_control_plane",
+        nats_subject="anomalies_pretrained_model",
         nats_queue="workers",
         payload_queue=logs_to_update_es_cp,
         subscribe_handler=anomalies_subscription_handler,
@@ -82,13 +82,13 @@ async def inference_logs(incoming_logs_queue):
                     row_dict["drain_pretrained_template_matched"] = template.get_template()
                     logs_inferenced_results.append(row_dict)
                 else:
-                    if row["is_control_plane_log"]:
+                    if row["log_type"] == "controlplane":
                         cp_model_logs.append(row_dict)
-                    elif row["is_rancher_log"]:
+                    elif row["log_type"] == "rancher":
                         rancher_model_logs.append(row_dict)
         if len(logs_inferenced_results) > 0:
             logs_inferenced_drain_df = (pd.DataFrame(logs_inferenced_results).to_json().encode())
-            await nw.publish("anomalies_control_plane", logs_inferenced_drain_df)
+            await nw.publish("anomalies_pretrained_model", logs_inferenced_drain_df)
         if len(cp_model_logs) > 0:
             model_logs_df = pd.DataFrame(cp_model_logs).to_json().encode()
             await nw.publish("opnilog_cp_logs", model_logs_df)
