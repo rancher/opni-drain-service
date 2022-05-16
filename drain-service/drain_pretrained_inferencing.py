@@ -1,10 +1,12 @@
 # Standard Library
 import asyncio
 from asyncio.exceptions import TimeoutError
+import json
 import logging
 import os
 import sys
 import time
+from io import StringIO
 
 # Third Party
 import pandas as pd
@@ -39,12 +41,12 @@ async def consume_logs(incoming_cp_logs_queue, logs_to_update_es_cp):
     async def subscribe_handler(msg):
         payload_data = msg.data.decode()
         await incoming_cp_logs_queue.put(
-            pd.read_json(payload_data, dtype={"_id": object, "cluster_id": str})
+            pd.read_json(StringIO(payload_data), dtype={"_id": object, "cluster_id": str, "ingest_at": str})
         )
 
     async def anomalies_subscription_handler(msg):
         anomalies_data = msg.data.decode()
-        await logs_to_update_es_cp.put(pd.read_json(anomalies_data, dtype={"_id": object, "cluster_id": str}))
+        await logs_to_update_es_cp.put(pd.read_json(anomalies_data, dtype={"_id": object, "cluster_id": str, "ingest_at": str}))
 
     await nw.subscribe(
         nats_subject="preprocessed_logs_pretrained_model",
@@ -65,11 +67,12 @@ async def inference_logs(incoming_logs_queue):
         This function will be inferencing on logs which are sent over through Nats and using the DRAIN model to match the logs to a template.
         If no match is made, the log is then sent over to be inferenced on by the Deep Learning model.
     '''
+    last_time = time.time()
+    logs_inferenced_results = []
     while True:
         logs_df = await incoming_logs_queue.get()
         start_time = time.time()
         logging.info("Received payload of size {}".format(len(logs_df)))
-        logs_inferenced_results = []
         cp_model_logs = []
         rancher_model_logs = []
         for index, row in logs_df.iterrows():
@@ -86,16 +89,19 @@ async def inference_logs(incoming_logs_queue):
                         cp_model_logs.append(row_dict)
                     elif row["log_type"] == "rancher":
                         rancher_model_logs.append(row_dict)
-        if len(logs_inferenced_results) > 0:
+        start_time = time.time()
+        if (start_time - last_time >= 1 and len(logs_inferenced_results) > 0) or len(logs_inferenced_results) >= 128:
             logs_inferenced_drain_df = (pd.DataFrame(logs_inferenced_results).to_json().encode())
             await nw.publish("anomalies_pretrained_model", logs_inferenced_drain_df)
+            logs_inferenced_results = []
+            last_time = start_time
         if len(cp_model_logs) > 0:
-            model_logs_df = pd.DataFrame(cp_model_logs).to_json().encode()
-            await nw.publish("opnilog_cp_logs", model_logs_df)
+            model_logs_json = json.dumps(cp_model_logs).encode()
+            await nw.publish("opnilog_cp_logs", model_logs_json)
             logging.info(f"Published {len(cp_model_logs)} logs to be inferenced on by Control Plane Deep Learning model.")
         if len(rancher_model_logs) > 0:
-            rancher_logs_df = pd.DataFrame(rancher_model_logs).to_json().encode()
-            await nw.publish("opnilog_rancher_logs", rancher_logs_df)
+            rancher_logs_json = json.dumps(rancher_model_logs).encode()
+            await nw.publish("opnilog_rancher_logs", rancher_logs_json)
             logging.info(f"Published {len(rancher_model_logs)} logs to be inferenced on by Rancher Deep Learning model.")
         logging.info(f"{len(logs_df)} logs processed in {(time.time() - start_time)} second(s)")
 
