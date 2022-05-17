@@ -1,10 +1,12 @@
 # Standard Library
 import asyncio
 from asyncio.exceptions import TimeoutError
+import json
 import logging
 import os
 import sys
 import time
+from io import StringIO
 
 # Third Party
 import pandas as pd
@@ -39,57 +41,69 @@ async def consume_logs(incoming_cp_logs_queue, logs_to_update_es_cp):
     async def subscribe_handler(msg):
         payload_data = msg.data.decode()
         await incoming_cp_logs_queue.put(
-            pd.read_json(payload_data, dtype={"_id": object, "cluster_id": str})
+            pd.read_json(StringIO(payload_data), dtype={"_id": object, "cluster_id": str, "ingest_at": str})
         )
 
     async def anomalies_subscription_handler(msg):
         anomalies_data = msg.data.decode()
-        await logs_to_update_es_cp.put(pd.read_json(anomalies_data, dtype={"_id": object, "cluster_id": str}))
+        await logs_to_update_es_cp.put(pd.read_json(anomalies_data, dtype={"_id": object, "cluster_id": str, "ingest_at": str}))
 
     await nw.subscribe(
-        nats_subject="preprocessed_logs_control_plane",
+        nats_subject="preprocessed_logs_pretrained_model",
         nats_queue="workers",
         payload_queue=incoming_cp_logs_queue,
         subscribe_handler=subscribe_handler,
     )
 
     await nw.subscribe(
-        nats_subject="anomalies_control_plane",
+        nats_subject="anomalies_pretrained_model",
         nats_queue="workers",
         payload_queue=logs_to_update_es_cp,
         subscribe_handler=anomalies_subscription_handler,
     )
 
-async def inference_cp_logs(incoming_cp_logs_queue):
+async def inference_logs(incoming_logs_queue):
     '''
         This function will be inferencing on logs which are sent over through Nats and using the DRAIN model to match the logs to a template.
         If no match is made, the log is then sent over to be inferenced on by the Deep Learning model.
     '''
+    last_time = time.time()
+    logs_inferenced_results = []
     while True:
-        cp_logs_df = await incoming_cp_logs_queue.get()
+        logs_df = await incoming_logs_queue.get()
         start_time = time.time()
-        logging.info("Received payload of size {}".format(len(cp_logs_df)))
-        logs_inferenced_results = []
-        model_logs = []
-        for index, row in cp_logs_df.iterrows():
+        logging.info("Received payload of size {}".format(len(logs_df)))
+        cp_model_logs = []
+        rancher_model_logs = []
+        for index, row in logs_df.iterrows():
             log_message = row["masked_log"]
             if log_message:
                 row_dict = row.to_dict()
-                template, anomaly_level = cp_template_miner.match(log_message)
+                template = cp_template_miner.match(log_message)
                 if template:
-                    row_dict["anomaly_level"] = anomaly_level
-                    row_dict["drain_control_plane_template_matched"] = template.get_template()
+                    row_dict["anomaly_level"] = template.get_anomaly_level()
+                    row_dict["drain_pretrained_template_matched"] = template.get_template()
                     logs_inferenced_results.append(row_dict)
                 else:
-                    model_logs.append(row_dict)
-        if len(logs_inferenced_results) > 0:
+                    if row["log_type"] == "controlplane":
+                        cp_model_logs.append(row_dict)
+                    elif row["log_type"] == "rancher":
+                        rancher_model_logs.append(row_dict)
+        start_time = time.time()
+        if (start_time - last_time >= 1 and len(logs_inferenced_results) > 0) or len(logs_inferenced_results) >= 128:
             logs_inferenced_drain_df = (pd.DataFrame(logs_inferenced_results).to_json().encode())
-            await nw.publish("anomalies_control_plane", logs_inferenced_drain_df)
-        if len(model_logs) > 0:
-            model_logs_df = pd.DataFrame(model_logs).to_json().encode()
-            await nw.publish("opnilog_cp_logs", model_logs_df)
-            logging.info(f"Published {len(model_logs)} logs to be inferenced on by Deep Learning model.")
-        logging.info(f"{len(cp_logs_df)} logs processed in {(time.time() - start_time)} second(s)")
+            await nw.publish("anomalies_pretrained_model", logs_inferenced_drain_df)
+            logs_inferenced_results = []
+            last_time = start_time
+        if len(cp_model_logs) > 0:
+            model_logs_json = json.dumps(cp_model_logs).encode()
+            await nw.publish("opnilog_cp_logs", model_logs_json)
+            logging.info(f"Published {len(cp_model_logs)} logs to be inferenced on by Control Plane Deep Learning model.")
+        if len(rancher_model_logs) > 0:
+            rancher_logs_json = json.dumps(rancher_model_logs).encode()
+            await nw.publish("opnilog_rancher_logs", rancher_logs_json)
+            logging.info(f"Published {len(rancher_model_logs)} logs to be inferenced on by Rancher Deep Learning model.")
+        logging.info(f"{len(logs_df)} logs processed in {(time.time() - start_time)} second(s)")
 
 
 async def setup_es_connection():
@@ -122,11 +136,11 @@ async def update_es_logs(queue):
         for index, document in df.iterrows():
             doc_dict = document.to_dict()
             doc_dict["doc"] = {}
-            doc_dict["doc"]["drain_control_plane_template_matched"] = doc_dict["drain_control_plane_template_matched"]
+            doc_dict["doc"]["drain_pretrained_template_matched"] = doc_dict["drain_pretrained_template_matched"]
             if "anomaly_level" in doc_dict:
                 doc_dict["doc"]["anomaly_level"] = doc_dict["anomaly_level"]
                 del doc_dict["anomaly_level"]
-            del doc_dict["drain_control_plane_template_matched"]
+            del doc_dict["drain_pretrained_template_matched"]
             yield doc_dict
 
     while True:
@@ -142,7 +156,7 @@ async def update_es_logs(queue):
                 async for ok, result in async_streaming_bulk(
                         es,
                         doc_generator(
-                            anomaly_df[["_id", "_op_type", "_index", "drain_control_plane_template_matched", "anomaly_level"]]
+                            anomaly_df[["_id", "_op_type", "_index", "drain_pretrained_template_matched", "anomaly_level"]]
                         ),
                         max_retries=1,
                         initial_backoff=1,
@@ -174,7 +188,7 @@ async def update_es_logs(queue):
                                 "_id",
                                 "_op_type",
                                 "_index",
-                                "drain_control_plane_template_matched"
+                                "drain_pretrained_template_matched"
                             ]
                         ]
                     ),
@@ -242,7 +256,7 @@ def main():
         incoming_cp_logs_queue, cp_logs_to_update_in_elasticsearch
     )
 
-    match_cp_logs_coroutine = inference_cp_logs(incoming_cp_logs_queue)
+    match_cp_logs_coroutine = inference_logs(incoming_cp_logs_queue)
 
     update_es_cp_coroutine = update_es_logs(cp_logs_to_update_in_elasticsearch)
 
