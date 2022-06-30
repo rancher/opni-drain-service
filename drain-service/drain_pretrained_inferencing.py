@@ -29,14 +29,14 @@ def get_serialized_protobuf_object(logs_dict_list):
 async def load_pretrain_model():
     # This function will load the pretrained DRAIN model for control plane logs in addition to the anomaly level for each template.
     try:
-        cp_template_miner.load_state("drain3_control_plane_model_v0.4.1.bin")
+        cp_template_miner.load_state("drain3_control_plane_model_v0.5.5.bin")
         logging.info("Able to load the DRAIN control plane model with {} clusters.".format(cp_template_miner.drain.clusters_counter))
         return True
     except Exception as e:
         logging.error(f"Unable to load DRAIN model {e}")
         return False
 
-async def consume_logs(incoming_cp_logs_queue):
+async def consume_logs(incoming_cp_logs_queue, update_model_logs_queue):
     # This function will subscribe to the Nats subjects preprocessed_logs_control_plane and anomalies.
     async def subscribe_handler(msg):
         payload_data = msg.data
@@ -44,11 +44,24 @@ async def consume_logs(incoming_cp_logs_queue):
         logs_df = pd.DataFrame(json_format.MessageToDict(log_payload_list.FromString(payload_data))["items"])
         await incoming_cp_logs_queue.put(logs_df)
 
+    async def inferenced_subscribe_handler(msg):
+        payload_data = msg.data
+        log_payload_list = payload_pb2.PayloadList()
+        logs_df = pd.DataFrame(json_format.MessageToDict(log_payload_list.FromString(payload_data))["items"])
+        await update_model_logs_queue.put(logs_df)
+
     await nw.subscribe(
         nats_subject="preprocessed_logs_pretrained_model",
         nats_queue="workers",
         payload_queue=incoming_cp_logs_queue,
         subscribe_handler=subscribe_handler,
+    )
+
+    await nw.subscribe(
+        nats_subject="model_inferenced_logs",
+        nats_queue="workers",
+        payload_queue=update_model_logs_queue,
+        subscribe_handler=inferenced_subscribe_handler,
     )
 
 async def inference_logs(incoming_logs_queue):
@@ -68,11 +81,14 @@ async def inference_logs(incoming_logs_queue):
             log_message = row["maskedLog"]
             if log_message:
                 row_dict = row.to_dict()
-                template = cp_template_miner.match(log_message)
+                template, template_anomaly_level, template_cluster_id = cp_template_miner.match(log_message)
                 if template:
-                    row_dict["anomalyLevel"] = template.get_anomaly_level()
-                    row_dict["drainPretrainedTemplateMatched"] = template.get_template()
+                    logging.info(template)
+                    logging.info(log_message)
+                    row_dict["anomalyLevel"] = template_anomaly_level
+                    row_dict["templateMatched"] = template
                     row_dict["inferenceModel"] = "drain"
+                    row_dict["templateClusterId"] = template_cluster_id
                     logs_inferenced_results.append(row_dict)
                 else:
                     if row["logType"] == "controlplane":
@@ -92,6 +108,20 @@ async def inference_logs(incoming_logs_queue):
         logging.info(f"{len(logs_df)} logs processed in {(time.time() - start_time)} second(s)")
 
 
+async def update_model(update_model_logs_queue):
+    while True:
+        inferenced_logs_df = await update_model_logs_queue.get()
+        final_inferenced_logs = []
+        for index, row in inferenced_logs_df.iterrows():
+            row_dict = row.to_dict()
+            log_message, anomaly_level = row["maskedLog"], row["anomalyLevel"]
+            result = cp_template_miner.add_log_message(log_message, anomaly_level)
+            row_dict["templateMatched"] = result["template_mined"]
+            row_dict["templateClusterId"] = result["cluster_id"]
+            final_inferenced_logs.append(row_dict)
+        logging.info(final_inferenced_logs)
+        await nw.publish("inferenced_logs", get_serialized_protobuf_object(final_inferenced_logs))
+
 async def init_nats():
     # This function initialized the connection to Nats.
     logging.info("connecting to nats")
@@ -103,6 +133,7 @@ async def init_nats():
 def main():
     loop = asyncio.get_event_loop()
     incoming_cp_logs_queue = asyncio.Queue(loop=loop)
+    update_model_logs_queue = asyncio.Queue(loop=loop)
     init_nats_task = loop.create_task(init_nats())
     loop.run_until_complete(init_nats_task)
 
@@ -111,14 +142,17 @@ def main():
     if not model_loaded:
         sys.exit(1)
 
-    preprocessed_logs_consumer_coroutine = consume_logs(incoming_cp_logs_queue)
+    preprocessed_logs_consumer_coroutine = consume_logs(incoming_cp_logs_queue, update_model_logs_queue)
 
     match_cp_logs_coroutine = inference_logs(incoming_cp_logs_queue)
+
+    update_model_coroutine = update_model(update_model_logs_queue)
 
     loop.run_until_complete(
         asyncio.gather(
             preprocessed_logs_consumer_coroutine,
-            match_cp_logs_coroutine
+            match_cp_logs_coroutine,
+            update_model_coroutine
         )
     )
     try:
