@@ -1,16 +1,12 @@
 # Standard Library
 import asyncio
-from asyncio.exceptions import TimeoutError
-import json
 import logging
 import sys
 import time
-from io import StringIO
 
 # Third Party
-from google.protobuf import json_format
+from loganomaly.loganomaly_pb import PayloadList
 import pandas as pd
-import payload_pb2
 from drain3.template_miner import TemplateMiner
 from opni_nats import NatsWrapper
 
@@ -20,11 +16,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(messa
 cp_template_miner = TemplateMiner()
 
 nw = NatsWrapper()
-
-def get_serialized_protobuf_object(logs_dict_list):
-    payload_list = payload_pb2.PayloadList()
-    protobuf_logs = {"items": logs_dict_list}
-    return (json_format.ParseDict(protobuf_logs, payload_list)).SerializeToString()
 
 async def load_pretrain_model():
     # This function will load the pretrained DRAIN model for control plane logs in addition to the anomaly level for each template.
@@ -40,8 +31,8 @@ async def consume_logs(incoming_cp_logs_queue):
     # This function will subscribe to the Nats subjects preprocessed_logs_control_plane and anomalies.
     async def subscribe_handler(msg):
         payload_data = msg.data
-        log_payload_list = payload_pb2.PayloadList()
-        logs_df = pd.DataFrame(json_format.MessageToDict(log_payload_list.FromString(payload_data))["items"])
+        log_payload_list = PayloadList()
+        logs_df = pd.DataFrame((log_payload_list.parse(payload_data)).items)
         await incoming_cp_logs_queue.put(logs_df)
 
     await nw.subscribe(
@@ -65,29 +56,29 @@ async def inference_logs(incoming_logs_queue):
         cp_model_logs = []
         rancher_model_logs = []
         for index, row in logs_df.iterrows():
-            log_message = row["maskedLog"]
+            log_message = row["masked_log"]
             if log_message:
                 row_dict = row.to_dict()
                 template = cp_template_miner.match(log_message)
                 if template:
-                    row_dict["anomalyLevel"] = template.get_anomaly_level()
-                    row_dict["drainPretrainedTemplateMatched"] = template.get_template()
-                    row_dict["inferenceModel"] = "drain"
+                    row_dict["anomaly_level"] = template.get_anomaly_level()
+                    row_dict["drain_pretrained_template_matched"] = template.get_template()
+                    row_dict["inference_model"] = "drain"
                     logs_inferenced_results.append(row_dict)
                 else:
-                    if row["logType"] == "controlplane":
+                    if row["log_type"] == "controlplane":
                         cp_model_logs.append(row_dict)
-                    elif row["logType"] == "rancher":
+                    elif row["log_type"] == "rancher":
                         rancher_model_logs.append(row_dict)
         if (start_time - last_time >= 1 and len(logs_inferenced_results) > 0) or len(logs_inferenced_results) >= 128:
-            await nw.publish("inferenced_logs", get_serialized_protobuf_object(logs_inferenced_results))
+            await nw.publish("inferenced_logs", bytes(PayloadList().from_dict({"items": logs_inferenced_results})))
             logs_inferenced_results = []
             last_time = start_time
         if len(cp_model_logs) > 0:
-            await nw.publish("opnilog_cp_logs", get_serialized_protobuf_object(cp_model_logs))
+            await nw.publish("opnilog_cp_logs", bytes(PayloadList().from_dict({"items": cp_model_logs})))
             logging.info(f"Published {len(cp_model_logs)} logs to be inferenced on by Control Plane Deep Learning model.")
         if len(rancher_model_logs) > 0:
-            await nw.publish("opnilog_rancher_logs", get_serialized_protobuf_object(rancher_model_logs))
+            await nw.publish("opnilog_rancher_logs", bytes(PayloadList().from_dict({"items": rancher_model_logs})))
             logging.info(f"Published {len(rancher_model_logs)} logs to be inferenced on by Rancher Deep Learning model.")
         logging.info(f"{len(logs_df)} logs processed in {(time.time() - start_time)} second(s)")
 
