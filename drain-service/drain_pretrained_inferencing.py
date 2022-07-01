@@ -62,7 +62,7 @@ async def inference_logs(incoming_logs_queue):
                 template = cp_template_miner.match(log_message)
                 if template:
                     row_dict["anomaly_level"] = template.get_anomaly_level()
-                    row_dict["drain_pretrained_template_matched"] = template.get_template()
+                    row_dict["template_matched"] = template.get_template()
                     row_dict["inference_model"] = "drain"
                     logs_inferenced_results.append(row_dict)
                 else:
