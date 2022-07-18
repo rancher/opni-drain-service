@@ -74,7 +74,7 @@ async def inference_logs(incoming_logs_queue):
             await nw.publish("opnilog_cp_logs", bytes(PayloadList(items = cp_model_logs)))
             logging.info(f"Published {len(cp_model_logs)} logs to be inferenced on by Control Plane Deep Learning model.")
         if len(rancher_model_logs) > 0:
-            await nw.publish("opnilog_cp_logs", bytes(PayloadList(items = rancher_model_logs)))
+            await nw.publish("opnilog_rancher_logs", bytes(PayloadList(items = rancher_model_logs)))
 
             logging.info(f"Published {len(rancher_model_logs)} logs to be inferenced on by Rancher Deep Learning model.")
         logging.info(f"{len(logs_payload.items)} logs processed in {(time.time() - start_time)} second(s)")
