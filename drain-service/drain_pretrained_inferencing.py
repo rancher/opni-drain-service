@@ -1,28 +1,16 @@
 # Standard Library
 import asyncio
-from asyncio.exceptions import TimeoutError
-import json
 import logging
-import os
 import sys
 import time
-from io import StringIO
 
 # Third Party
-import pandas as pd
+from opni_proto.log_anomaly_payload_pb import PayloadList
 from drain3.template_miner import TemplateMiner
-from elasticsearch import AsyncElasticsearch, TransportError
-from elasticsearch.exceptions import ConnectionTimeout
-from elasticsearch.helpers import BulkIndexError, async_streaming_bulk
 from opni_nats import NatsWrapper
-
-pd.set_option("mode.chained_assignment", None)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
 cp_template_miner = TemplateMiner()
-ES_ENDPOINT = os.environ["ES_ENDPOINT"]
-ES_USERNAME = os.environ["ES_USERNAME"]
-ES_PASSWORD = os.environ["ES_PASSWORD"]
 
 nw = NatsWrapper()
 
@@ -36,30 +24,19 @@ async def load_pretrain_model():
         logging.error(f"Unable to load DRAIN model {e}")
         return False
 
-async def consume_logs(incoming_cp_logs_queue, logs_to_update_es_cp):
+async def consume_logs(incoming_cp_logs_queue):
     # This function will subscribe to the Nats subjects preprocessed_logs_control_plane and anomalies.
     async def subscribe_handler(msg):
-        payload_data = msg.data.decode()
-        await incoming_cp_logs_queue.put(
-            pd.read_json(StringIO(payload_data), dtype={"_id": object, "cluster_id": str, "ingest_at": str})
-        )
-
-    async def anomalies_subscription_handler(msg):
-        anomalies_data = msg.data.decode()
-        await logs_to_update_es_cp.put(pd.read_json(anomalies_data, dtype={"_id": object, "cluster_id": str, "ingest_at": str}))
+        payload_data = msg.data
+        logs_payload_list = PayloadList()
+        logs_payload = logs_payload_list.parse(payload_data)
+        await incoming_cp_logs_queue.put(logs_payload)
 
     await nw.subscribe(
         nats_subject="preprocessed_logs_pretrained_model",
         nats_queue="workers",
         payload_queue=incoming_cp_logs_queue,
         subscribe_handler=subscribe_handler,
-    )
-
-    await nw.subscribe(
-        nats_subject="anomalies_pretrained_model",
-        nats_queue="workers",
-        payload_queue=logs_to_update_es_cp,
-        subscribe_handler=anomalies_subscription_handler,
     )
 
 async def inference_logs(incoming_logs_queue):
@@ -70,145 +47,38 @@ async def inference_logs(incoming_logs_queue):
     last_time = time.time()
     logs_inferenced_results = []
     while True:
-        logs_df = await incoming_logs_queue.get()
+        logs_payload = await incoming_logs_queue.get()
         start_time = time.time()
-        logging.info("Received payload of size {}".format(len(logs_df)))
+        logging.info("Received payload of size {}".format(len(logs_payload.items)))
         cp_model_logs = []
         rancher_model_logs = []
-        for index, row in logs_df.iterrows():
-            log_message = row["masked_log"]
+        for log_data in logs_payload.items:
+            log_message = log_data.masked_log
             if log_message:
-                row_dict = row.to_dict()
                 template = cp_template_miner.match(log_message)
                 if template:
-                    row_dict["anomaly_level"] = template.get_anomaly_level()
-                    row_dict["drain_pretrained_template_matched"] = template.get_template()
-                    logs_inferenced_results.append(row_dict)
+                    log_data.anomaly_level = template.get_anomaly_level()
+                    log_data.template_matched = template.get_template()
+                    log_data.inference_model = "drain"
+                    logs_inferenced_results.append(log_data)
                 else:
-                    if row["log_type"] == "controlplane":
-                        cp_model_logs.append(row_dict)
-                    elif row["log_type"] == "rancher":
-                        rancher_model_logs.append(row_dict)
-        start_time = time.time()
+                    if log_data.log_type == "controlplane":
+                        cp_model_logs.append(log_data)
+                    elif log_data.log_type == "rancher":
+                        rancher_model_logs.append(log_data)
         if (start_time - last_time >= 1 and len(logs_inferenced_results) > 0) or len(logs_inferenced_results) >= 128:
-            logs_inferenced_drain_df = (pd.DataFrame(logs_inferenced_results).to_json().encode())
-            await nw.publish("anomalies_pretrained_model", logs_inferenced_drain_df)
+            await nw.publish("inferenced_logs", bytes(PayloadList(items=logs_inferenced_results)))
             logs_inferenced_results = []
             last_time = start_time
         if len(cp_model_logs) > 0:
-            model_logs_json = json.dumps(cp_model_logs).encode()
-            await nw.publish("opnilog_cp_logs", model_logs_json)
+            await nw.publish("opnilog_cp_logs", bytes(PayloadList(items = cp_model_logs)))
             logging.info(f"Published {len(cp_model_logs)} logs to be inferenced on by Control Plane Deep Learning model.")
         if len(rancher_model_logs) > 0:
-            rancher_logs_json = json.dumps(rancher_model_logs).encode()
-            await nw.publish("opnilog_rancher_logs", rancher_logs_json)
+            await nw.publish("opnilog_rancher_logs", bytes(PayloadList(items = rancher_model_logs)))
+
             logging.info(f"Published {len(rancher_model_logs)} logs to be inferenced on by Rancher Deep Learning model.")
-        logging.info(f"{len(logs_df)} logs processed in {(time.time() - start_time)} second(s)")
+        logging.info(f"{len(logs_payload.items)} logs processed in {(time.time() - start_time)} second(s)")
 
-
-async def setup_es_connection():
-    # This function will be setting up the Opensearch connection.
-    logging.info("Setting up AsyncElasticsearch")
-    return AsyncElasticsearch(
-        [ES_ENDPOINT],
-        port=9200,
-        http_auth=(ES_USERNAME, ES_PASSWORD),
-        http_compress=True,
-        max_retries=10,
-        retry_on_status={100, 400, 503},
-        retry_on_timeout=True,
-        timeout=20,
-        use_ssl=True,
-        verify_certs=False,
-        sniff_on_start=False,
-        # refresh nodes after a node fails to respond
-        sniff_on_connection_fail=True,
-        # and also every 60 seconds
-        sniffer_timeout=60,
-        sniff_timeout=10,
-    )
-
-async def update_es_logs(queue):
-    # This function will be updating Opensearch logs which were inferred on by the DRAIN model.
-    es = await setup_es_connection()
-
-    async def doc_generator(df):
-        for index, document in df.iterrows():
-            doc_dict = document.to_dict()
-            doc_dict["doc"] = {}
-            doc_dict["doc"]["drain_pretrained_template_matched"] = doc_dict["drain_pretrained_template_matched"]
-            if "anomaly_level" in doc_dict:
-                doc_dict["doc"]["anomaly_level"] = doc_dict["anomaly_level"]
-                del doc_dict["anomaly_level"]
-            del doc_dict["drain_pretrained_template_matched"]
-            yield doc_dict
-
-    while True:
-        df = await queue.get()
-        df["_op_type"] = "update"
-        df["_index"] = "logs"
-        normal_df = df[df["anomaly_level"] == "Normal"]
-        anomaly_df = df[df["anomaly_level"] == "Anomaly"]
-        if len(anomaly_df) == 0:
-            logging.info("No anomalies in this payload")
-        else:
-            try:
-                async for ok, result in async_streaming_bulk(
-                        es,
-                        doc_generator(
-                            anomaly_df[["_id", "_op_type", "_index", "drain_pretrained_template_matched", "anomaly_level"]]
-                        ),
-                        max_retries=1,
-                        initial_backoff=1,
-                        request_timeout=5,
-                ):
-                    action, result = result.popitem()
-                    if not ok:
-                        logging.error("failed to {} document {}".format())
-                logging.info(f"Updated {len(anomaly_df)} anomalies in ES")
-            except (BulkIndexError, ConnectionTimeout, TimeoutError) as exception:
-                logging.error(
-                    "Failed to index data. Re-adding to logs_to_update_in_elasticsearch queue"
-                )
-                logging.error(exception)
-                await queue.put(anomaly_df)
-            except TransportError as exception:
-                logging.info(f"Error in async_streaming_bulk {exception}")
-                if exception.status_code == "N/A":
-                    logging.info("Elasticsearch connection error")
-                    es = await setup_es_connection()
-
-        try:
-            # update normal logs in ES
-            async for ok, result in async_streaming_bulk(
-                    es,
-                    doc_generator(
-                        normal_df[
-                            [
-                                "_id",
-                                "_op_type",
-                                "_index",
-                                "drain_pretrained_template_matched"
-                            ]
-                        ]
-                    ),
-                    max_retries=1,
-                    initial_backoff=1,
-                    request_timeout=5,
-            ):
-                action, result = result.popitem()
-                if not ok:
-                    logging.error("failed to {} document {}".format())
-            logging.info(f"Updated {len(normal_df)} normal logs in ES")
-        except (BulkIndexError, ConnectionTimeout) as exception:
-            logging.error("Failed to index data")
-            logging.error(exception)
-            await queue.put(df)
-        except TransportError as exception:
-            logging.info(f"Error in async_streaming_bulk {exception}")
-            if exception.status_code == "N/A":
-                logging.info("Elasticsearch connection error")
-                es = await setup_es_connection()
 
 async def init_nats():
     # This function initialized the connection to Nats.
@@ -216,55 +86,27 @@ async def init_nats():
     await nw.connect()
 
 
-async def wait_for_index():
-    # This function is used to setup the Opensearch connection.
-    es = await setup_es_connection()
-    while True:
-        try:
-            exists = await es.indices.exists("logs")
-            if exists:
-                break
-            else:
-                logging.info("waiting for logs index")
-                time.sleep(2)
 
-        except TransportError as exception:
-            logging.info(f"Error in es indices {exception}")
-            if exception.status_code == "N/A":
-                logging.info("Elasticsearch connection error")
-                es = await setup_es_connection()
 
 def main():
     loop = asyncio.get_event_loop()
     incoming_cp_logs_queue = asyncio.Queue(loop=loop)
-    cp_logs_to_update_in_elasticsearch = asyncio.Queue(loop=loop)
-
-    # Run initialization tasks
-    loop.run_until_complete(
-        asyncio.gather(
-            init_nats(),
-            wait_for_index(),
-        )
-    )
+    init_nats_task = loop.create_task(init_nats())
+    loop.run_until_complete(init_nats_task)
 
     init_model_task = loop.create_task(load_pretrain_model())
     model_loaded = loop.run_until_complete(init_model_task)
     if not model_loaded:
         sys.exit(1)
 
-    preprocessed_logs_consumer_coroutine = consume_logs(
-        incoming_cp_logs_queue, cp_logs_to_update_in_elasticsearch
-    )
+    preprocessed_logs_consumer_coroutine = consume_logs(incoming_cp_logs_queue)
 
     match_cp_logs_coroutine = inference_logs(incoming_cp_logs_queue)
-
-    update_es_cp_coroutine = update_es_logs(cp_logs_to_update_in_elasticsearch)
 
     loop.run_until_complete(
         asyncio.gather(
             preprocessed_logs_consumer_coroutine,
-            match_cp_logs_coroutine,
-            update_es_cp_coroutine,
+            match_cp_logs_coroutine
         )
     )
     try:
