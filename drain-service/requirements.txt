@@ -2,5 +2,8 @@ boto3==1.17.45
 botocore==1.20.45
 cachetools==4.2.1
 jsonpickle==1.5.1
-opni-proto==0.5.4
+numpy==1.20.3
+opni-nats==0.0.0.4
+opni-proto==0.5.4.6
+pandas==1.2.3
 ruptures==1.1.4

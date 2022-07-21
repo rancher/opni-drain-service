@@ -6,11 +6,8 @@ import time
 
 # Third Party
 from opni_proto.log_anomaly_payload_pb import PayloadList
-import pandas as pd
 from drain3.template_miner import TemplateMiner
 from opni_nats import NatsWrapper
-
-pd.set_option("mode.chained_assignment", None)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
 cp_template_miner = TemplateMiner()
@@ -31,9 +28,9 @@ async def consume_logs(incoming_cp_logs_queue, update_model_logs_queue):
     # This function will subscribe to the Nats subjects preprocessed_logs_control_plane and anomalies.
     async def subscribe_handler(msg):
         payload_data = msg.data
-        log_payload_list = PayloadList()
-        logs_df = pd.DataFrame((log_payload_list.parse(payload_data)).items)
-        await incoming_cp_logs_queue.put(logs_df)
+        logs_payload_list = PayloadList()
+        logs_payload = logs_payload_list.parse(payload_data)
+        await incoming_cp_logs_queue.put(logs_payload)
 
     async def inferenced_subscribe_handler(msg):
         payload_data = msg.data
@@ -63,38 +60,37 @@ async def inference_logs(incoming_logs_queue):
     last_time = time.time()
     logs_inferenced_results = []
     while True:
-        logs_df = await incoming_logs_queue.get()
+        logs_payload = await incoming_logs_queue.get()
         start_time = time.time()
-        logging.info("Received payload of size {}".format(len(logs_df)))
+        logging.info("Received payload of size {}".format(len(logs_payload.items)))
         cp_model_logs = []
         rancher_model_logs = []
-        for index, row in logs_df.iterrows():
-            log_message = row["masked_log"]
+        for log_data in logs_payload.items:
+            log_message = log_data.masked_log
             if log_message:
-                row_dict = row.to_dict()
-                template, template_anomaly_level, template_cluster_id = cp_template_miner.match(log_message)
+                template = cp_template_miner.match(log_message)
                 if template:
-                    row_dict["anomaly_level"] = template_anomaly_level
-                    row_dict["template_matched"] = template
-                    row_dict["inference_model"] = "drain"
-                    row_dict["template_cluster_id"] = template_cluster_id
-                    logs_inferenced_results.append(row_dict)
+                    log_data.anomaly_level = template.get_anomaly_level()
+                    log_data.template_matched = template.get_template()
+                    log_data.inference_model = "drain"
+                    logs_inferenced_results.append(log_data)
                 else:
-                    if row["log_type"] == "controlplane":
-                        cp_model_logs.append(row_dict)
-                    elif row["log_type"] == "rancher":
-                        rancher_model_logs.append(row_dict)
+                    if log_data.log_type == "controlplane":
+                        cp_model_logs.append(log_data)
+                    elif log_data.log_type == "rancher":
+                        rancher_model_logs.append(log_data)
         if (start_time - last_time >= 1 and len(logs_inferenced_results) > 0) or len(logs_inferenced_results) >= 128:
-            await nw.publish("inferenced_logs", bytes(PayloadList().from_dict({"items": logs_inferenced_results})))
+            await nw.publish("inferenced_logs", bytes(PayloadList(items=logs_inferenced_results)))
             logs_inferenced_results = []
             last_time = start_time
         if len(cp_model_logs) > 0:
-            await nw.publish("opnilog_cp_logs", bytes(PayloadList().from_dict({"items": cp_model_logs})))
+            await nw.publish("opnilog_cp_logs", bytes(PayloadList(items = cp_model_logs)))
             logging.info(f"Published {len(cp_model_logs)} logs to be inferenced on by Control Plane Deep Learning model.")
         if len(rancher_model_logs) > 0:
-            await nw.publish("opnilog_rancher_logs", bytes(PayloadList().from_dict({"items": rancher_model_logs})))
+            await nw.publish("opnilog_rancher_logs", bytes(PayloadList(items = rancher_model_logs)))
+
             logging.info(f"Published {len(rancher_model_logs)} logs to be inferenced on by Rancher Deep Learning model.")
-        logging.info(f"{len(logs_df)} logs processed in {(time.time() - start_time)} second(s)")
+        logging.info(f"{len(logs_payload.items)} logs processed in {(time.time() - start_time)} second(s)")
 
 
 async def update_model(update_model_logs_queue):
