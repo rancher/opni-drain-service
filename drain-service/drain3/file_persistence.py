@@ -13,11 +13,7 @@ import boto3
 import botocore
 from botocore.client import Config
 from drain3.persistence_handler import PersistenceHandler
-from elasticsearch import Elasticsearch
 
-ES_ENDPOINT = os.environ["ES_ENDPOINT"]
-ES_USERNAME = os.environ["ES_USERNAME"]
-ES_PASSWORD = os.environ["ES_PASSWORD"]
 S3_ENDPOINT = os.environ["S3_ENDPOINT"]
 S3_ACCESS_KEY = os.environ["S3_ACCESS_KEY"]
 S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
@@ -29,24 +25,6 @@ class FilePersistence(PersistenceHandler):
         self.file_path = file_path
         self.connect_to_s3()
         self.last_s3_save_ts = -1
-        self.es = Elasticsearch(
-            [ES_ENDPOINT],
-            port=9200,
-            http_auth=(ES_USERNAME, ES_PASSWORD),
-            http_compress=True,
-            max_retries=10,
-            retry_on_status={100, 400, 503},
-            retry_on_timeout=True,
-            timeout=20,
-            use_ssl=True,
-            verify_certs=False,
-            sniff_on_start=False,
-            # refresh nodes after a node fails to respond
-            sniff_on_connection_fail=True,
-            # and also every 60 seconds
-            sniffer_timeout=60,
-            sniff_timeout=10,
-        )
 
     def connect_to_s3(self):
         self.s3_client = None
@@ -77,27 +55,16 @@ class FilePersistence(PersistenceHandler):
             logging.info(f"{S3_BUCKET} bucket does not exist so creating it now")
             self.s3_client.create_bucket(Bucket=S3_BUCKET)
 
-    def save_state(self, state, num_drain_clusters):
+    def save_state(self, state):
         pathlib.Path(self.file_path).write_bytes(state)
-        if time.time() - self.last_s3_save_ts > 60:
-            try:
-                self.s3_client.meta.client.upload_file(
-                    self.file_path, S3_BUCKET, self.file_path
-                )
-                logging.info("Saved DRAIN model into S3")
-                self.last_s3_save_ts = time.time()
-            except Exception as e:
-                logging.error("Unable to save DRAIN model into S3")
-
-        drain_status_doc = {
-            "num_log_clusters": num_drain_clusters,
-            "update_type": "drain_persist",
-            "timestamp": int(time.time() * 1000),
-        }
         try:
-            res = self.es.index(index="opni-drain-model-status", body=drain_status_doc)
+            self.s3_client.meta.client.upload_file(
+                self.file_path, S3_BUCKET, self.file_path
+            )
+            logging.info("Saved DRAIN model into S3")
+            self.last_s3_save_ts = time.time()
         except Exception as e:
-            logging.error("Error when indexing status to opni-drain-model-status")
+            logging.error("Unable to save DRAIN model into S3")
 
     def load_state(self):
         try:
