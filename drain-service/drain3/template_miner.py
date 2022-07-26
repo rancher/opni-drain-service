@@ -100,7 +100,7 @@ class TemplateMiner:
                 len(drain.clusters), drain.get_total_cluster_size()
             )
         )
-    def save_state(self, snapshot_reason):
+    def save_state(self):
         state = jsonpickle.dumps(self.drain, keys=True).encode("utf-8")
         if self.config.snapshot_compress_state:
             state = base64.b64encode(zlib.compress(state))
@@ -109,10 +109,9 @@ class TemplateMiner:
 
         logger.info(
             f"Saving state of {num_drain_clusters} clusters "
-            f"with {self.drain.get_total_cluster_size()} messages, {len(state)} bytes, "
-            f"reason: {snapshot_reason}"
+            f"with {self.drain.get_total_cluster_size()} messages, {len(state)} bytes"
         )
-        self.persistence_handler.save_state(state, num_drain_clusters)
+        self.persistence_handler.save_state(state)
 
     def save_state_local(self, snapshot_reason, file_path):
         state = jsonpickle.dumps(self.drain, keys=True).encode("utf-8")
@@ -152,15 +151,6 @@ class TemplateMiner:
             "template_mined": cluster.get_template(),
             "cluster_count": len(self.drain.clusters),
         }
-
-        if self.persistence_handler is not None:
-            self.profiler.start_section("save_state")
-            snapshot_reason = self.get_snapshot_reason(change_type, cluster.cluster_id)
-            if snapshot_reason:
-                self.save_state(snapshot_reason)
-                self.last_save_time = time.time()
-            self.profiler.end_section()
-
         self.profiler.end_section("total")
         self.profiler.report(self.config.profiling_report_sec)
         return result
@@ -177,14 +167,6 @@ class TemplateMiner:
             "template_mined": cluster.get_template(),
             "cluster_count": len(self.drain.clusters),
         }
-
-        if self.persistence_handler is not None:
-            self.profiler.start_section("save_state")
-            snapshot_reason = self.get_snapshot_reason("cluster_created", cluster.cluster_id)
-            if snapshot_reason:
-                self.save_state(snapshot_reason)
-                self.last_save_time = time.time()
-            self.profiler.end_section()
 
         self.profiler.end_section("total")
         self.profiler.report(self.config.profiling_report_sec)
