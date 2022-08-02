@@ -29,7 +29,7 @@ def match_template(log_data, template_miner):
 async def load_pretrain_model():
     # This function will load the pretrained DRAIN model for control plane logs in addition to the anomaly level for each template.
     try:
-        pretrained_template_miner.load_state("drain3_control_plane_model_v0.5.5.bin")
+        pretrained_template_miner.load_state("drain3_control_plane_model_v0.6.0.bin")
         num_pretrained_clusters = pretrained_template_miner.drain.clusters_counter
         logging.info("Able to load the DRAIN control plane model with {} clusters.".format(num_pretrained_clusters))
         persistence = FilePersistence("drain3_non_workload_model.bin")
