@@ -27,6 +27,7 @@ class TemplateMiner:
         self,
         persistence_handler: PersistenceHandler = None,
         config: TemplateMinerConfig = None,
+        clusters_counter: int = 0
     ):
         """
         Wrapper for Drain with persistence and masking support
@@ -57,6 +58,7 @@ class TemplateMiner:
             extra_delimiters=self.config.drain_extra_delimiters,
             profiler=self.profiler,
             param_str=param_str,
+            clusters_counter=clusters_counter
         )
         self.last_save_time = time.time()
         if persistence_handler is not None:

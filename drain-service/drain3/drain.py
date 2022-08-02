@@ -65,6 +65,7 @@ class Drain:
         extra_delimiters=(),
         profiler: Profiler = NullProfiler(),
         param_str="<*>",
+        clusters_counter=0
     ):
         """
         Attributes
@@ -93,7 +94,7 @@ class Drain:
         self.id_to_cluster = (
             {} if max_clusters is None else LRUCache(maxsize=max_clusters)
         )
-        self.clusters_counter = 0
+        self.clusters_counter = clusters_counter
 
     @property
     def clusters(self):
@@ -314,7 +315,7 @@ class Drain:
             self.profiler.end_section()
 
         # Match no existing log cluster
-        if match_cluster is None or match_cluster.is_pretrained_template():
+        if match_cluster is None:
             if self.profiler:
                 self.profiler.start_section("create_cluster")
             self.clusters_counter += 1

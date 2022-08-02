@@ -11,20 +11,33 @@ from drain3.template_miner import TemplateMiner
 from opni_nats import NatsWrapper
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
-persistence = FilePersistence("drain3_non_workload_model.bin")
-pretrained_template_miner = TemplateMiner(persistence)
+pretrained_template_miner = TemplateMiner()
 
 nw = NatsWrapper()
+
+def match_template(log_data, template_miner):
+    template, anomaly_level, cluster_id = template_miner.match(log_data.masked_log)
+    if template:
+        log_data.anomaly_level = anomaly_level
+        log_data.template_cluster_id = cluster_id
+        log_data.template_matched = template
+        log_data.inference_model = "drain"
+        return True
+    return False
+
 
 async def load_pretrain_model():
     # This function will load the pretrained DRAIN model for control plane logs in addition to the anomaly level for each template.
     try:
         pretrained_template_miner.load_state("drain3_control_plane_model_v0.5.5.bin")
-        logging.info("Able to load the DRAIN control plane model with {} clusters.".format(pretrained_template_miner.drain.clusters_counter))
-        return True
+        num_pretrained_clusters = pretrained_template_miner.drain.clusters_counter
+        logging.info("Able to load the DRAIN control plane model with {} clusters.".format(num_pretrained_clusters))
+        persistence = FilePersistence("drain3_non_workload_model.bin")
+        current_template_miner = TemplateMiner(persistence_handler=persistence, clusters_counter=num_pretrained_clusters)
+        return True, current_template_miner
     except Exception as e:
         logging.error(f"Unable to load DRAIN model {e}")
-        return False
+        return False, None
 
 async def consume_logs(incoming_cp_logs_queue, update_model_logs_queue, batch_processed_queue):
     # This function will subscribe to the Nats subjects preprocessed_logs_control_plane and anomalies.
@@ -60,17 +73,17 @@ async def consume_logs(incoming_cp_logs_queue, update_model_logs_queue, batch_pr
         subscribe_handler=inferenced_subscribe_handler,
     )
 
-async def persist_model(batch_processed_queue):
+async def persist_model(batch_processed_queue, current_template_miner):
     last_upload = time.time()
     while True:
         processed_payload = await batch_processed_queue.get()
         current_time = time.time()
         if current_time - last_upload >= 3600:
-            pretrained_template_miner.save_state()
+            current_template_miner.save_state()
             last_upload = time.time()
 
 
-async def inference_logs(incoming_logs_queue):
+async def inference_logs(incoming_logs_queue, current_template_miner):
     '''
         This function will be inferencing on logs which are sent over through Nats and using the DRAIN model to match the logs to a template.
         If no match is made, the log is then sent over to be inferenced on by the Deep Learning model.
@@ -86,12 +99,9 @@ async def inference_logs(incoming_logs_queue):
         for log_data in logs_payload.items:
             log_message = log_data.masked_log
             if log_message:
-                template, anomaly_level, cluster_id = pretrained_template_miner.match(log_message)
-                if template:
-                    log_data.anomaly_level = anomaly_level
-                    log_data.template_cluster_id = cluster_id
-                    log_data.template_matched = template
-                    log_data.inference_model = "drain"
+                if match_template(log_data, pretrained_template_miner):
+                    logs_inferenced_results.append(log_data)
+                elif match_template(log_data, current_template_miner):
                     logs_inferenced_results.append(log_data)
                 else:
                     if log_data.log_type == "controlplane":
@@ -99,6 +109,7 @@ async def inference_logs(incoming_logs_queue):
                     elif log_data.log_type == "rancher":
                         rancher_model_logs.append(log_data)
         if (start_time - last_time >= 1 and len(logs_inferenced_results) > 0) or len(logs_inferenced_results) >= 128:
+            logging.info("over here right now.")
             await nw.publish("inferenced_logs", bytes(PayloadList(items=logs_inferenced_results)))
             logs_inferenced_results = []
             last_time = start_time
@@ -112,7 +123,7 @@ async def inference_logs(incoming_logs_queue):
         logging.info(f"{len(logs_payload.items)} logs processed in {(time.time() - start_time)} second(s)")
 
 
-async def update_model(update_model_logs_queue):
+async def update_model(update_model_logs_queue, current_template_miner):
     '''
     This function will process logs that were passed back by the Inferencing service. These log messages will be
     added to the pretrained DRAIN model in addition to the predicted anomaly level as well.
@@ -123,12 +134,12 @@ async def update_model(update_model_logs_queue):
         for log_data in inferenced_logs.items:
             log_message = log_data.masked_log
             anomaly_level = log_data.anomaly_level
-            result = pretrained_template_miner.add_log_message(log_message, anomaly_level)
+            result = current_template_miner.add_log_message(log_message, anomaly_level)
             log_data.template_matched = result["template_mined"]
             log_data.template_cluster_id = result["cluster_id"]
             final_inferenced_logs.append(log_data)
         await nw.publish("inferenced_logs", bytes(PayloadList(items = final_inferenced_logs)))
-        await nw.publish("batch_processed", "payload processed".encode())
+        await nw.publish("batch_processed", "processed".encode())
 
 async def init_nats():
     # This function initialized the connection to Nats.
@@ -145,21 +156,18 @@ def main():
     batch_processed_queue = asyncio.Queue(loop=loop)
     init_nats_task = loop.create_task(init_nats())
     loop.run_until_complete(init_nats_task)
-    num_clusters = pretrained_template_miner.drain.clusters_counter
-    # If there are no clusters in the template miner, load the pretrained DRAIN model.
-    if num_clusters == 0:
-        init_model_task = loop.create_task(load_pretrain_model())
-        model_loaded = loop.run_until_complete(init_model_task)
-        if not model_loaded:
-            sys.exit(1)
+    init_model_task = loop.create_task(load_pretrain_model())
+    model_loaded, current_template_miner = loop.run_until_complete(init_model_task)
+    if not model_loaded:
+        sys.exit(1)
 
     preprocessed_logs_consumer_coroutine = consume_logs(incoming_cp_logs_queue, update_model_logs_queue, batch_processed_queue)
 
-    match_cp_logs_coroutine = inference_logs(incoming_cp_logs_queue)
+    match_cp_logs_coroutine = inference_logs(incoming_cp_logs_queue, current_template_miner)
 
-    update_model_coroutine = update_model(update_model_logs_queue)
+    update_model_coroutine = update_model(update_model_logs_queue, current_template_miner)
 
-    persist_model_coroutine = persist_model(batch_processed_queue)
+    persist_model_coroutine = persist_model(batch_processed_queue, current_template_miner)
 
     loop.run_until_complete(
         asyncio.gather(
