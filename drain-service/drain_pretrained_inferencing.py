@@ -99,9 +99,7 @@ async def inference_logs(incoming_logs_queue, pretrained_template_miner, current
         for log_data in logs_payload.items:
             log_message = log_data.masked_log
             if log_message:
-                if match_template(log_data, pretrained_template_miner):
-                    logs_inferenced_results.append(log_data)
-                elif match_template(log_data, current_template_miner):
+                if match_template(log_data, pretrained_template_miner) or match_template(log_data, current_template_miner):
                     logs_inferenced_results.append(log_data)
                 else:
                     if log_data.log_type == "controlplane":
@@ -109,7 +107,6 @@ async def inference_logs(incoming_logs_queue, pretrained_template_miner, current
                     elif log_data.log_type == "rancher":
                         rancher_model_logs.append(log_data)
         if (start_time - last_time >= 1 and len(logs_inferenced_results) > 0) or len(logs_inferenced_results) >= 128:
-            logging.info("over here right now.")
             await nw.publish("inferenced_logs", bytes(PayloadList(items=logs_inferenced_results)))
             logs_inferenced_results = []
             last_time = start_time
