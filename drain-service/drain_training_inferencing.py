@@ -14,9 +14,6 @@ import pandas as pd
 import ruptures as rpt
 from drain3.file_persistence import FilePersistence
 from drain3.template_miner import TemplateMiner
-from elasticsearch import AsyncElasticsearch, TransportError
-from elasticsearch.exceptions import ConnectionTimeout
-from elasticsearch.helpers import BulkIndexError, async_streaming_bulk
 from opni_nats import NatsWrapper
 
 pd.set_option("mode.chained_assignment", None)
@@ -131,7 +128,6 @@ async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
                 .encode()
         )
         await nw.publish("anomalies", prediction_payload)
-
 
 async def setup_es_connection():
     logging.info("Setting up AsyncElasticsearch")

@@ -10,20 +10,39 @@ from drain3.simple_profiler import NullProfiler, Profiler
 
 
 class LogCluster:
-    __slots__ = ["log_template_tokens", "cluster_id", "anomaly_level","size"]
+    __slots__ = ["log_template_tokens", "cluster_id", "is_pretrained","pretrained_anomaly_level","size", "cache"]
 
-    def __init__(self, log_template_tokens: list, cluster_id: int, anomaly_level="Normal"):
+    def __init__(self, log_template_tokens: list, cluster_id: int, is_pretrained = False, pretrained_anomaly_level=None):
         self.log_template_tokens = tuple(log_template_tokens)
         self.cluster_id = cluster_id
-        self.anomaly_level = anomaly_level
+        self.is_pretrained = is_pretrained
+        self.pretrained_anomaly_level = pretrained_anomaly_level
+        self.cache = dict()
         self.size = 1
 
     def get_template(self):
         return " ".join(self.log_template_tokens)
 
-    def get_anomaly_level(self):
-        return self.anomaly_level
+    def get_cluster_id(self):
+        return self.cluster_id
 
+    def get_pretrained_anomaly_level(self):
+        return self.pretrained_anomaly_level
+
+    def is_pretrained_template(self):
+        return self.is_pretrained
+
+    def get_cache(self):
+        return self.cache
+
+    def add_to_cache(self, message: str, anomaly_level: str):
+        if not message in self.cache:
+            self.cache[message] = anomaly_level
+
+    def get_message_anomaly_level(self, message: str):
+        if message in self.cache:
+            return self.cache[message]
+        return None
     def __str__(self):
         return f"ID={str(self.cluster_id).ljust(5)} : size={str(self.size).ljust(10)}: {self.get_template()}"
 
@@ -46,6 +65,7 @@ class Drain:
         extra_delimiters=(),
         profiler: Profiler = NullProfiler(),
         param_str="<*>",
+        clusters_counter=0
     ):
         """
         Attributes
@@ -74,7 +94,7 @@ class Drain:
         self.id_to_cluster = (
             {} if max_clusters is None else LRUCache(maxsize=max_clusters)
         )
-        self.clusters_counter = 0
+        self.clusters_counter = clusters_counter
 
     @property
     def clusters(self):
@@ -283,7 +303,7 @@ class Drain:
         content_tokens = content.split()
         return content_tokens
 
-    def add_log_message(self, content: str):
+    def add_log_message(self, content: str, anomaly_level: str):
         content_tokens = self.get_content_as_tokens(content)
 
         if self.profiler:
@@ -301,6 +321,7 @@ class Drain:
             self.clusters_counter += 1
             cluster_id = self.clusters_counter
             match_cluster = LogCluster(content_tokens, cluster_id)
+            match_cluster.add_to_cache(content, anomaly_level)
             self.id_to_cluster[cluster_id] = match_cluster
             self.add_seq_to_prefix_tree(self.root_node, match_cluster)
             update_type = "cluster_created"
@@ -317,6 +338,7 @@ class Drain:
             else:
                 match_cluster.log_template_tokens = tuple(new_template_tokens)
                 update_type = "cluster_template_changed"
+            match_cluster.add_to_cache(content, anomaly_level)
             match_cluster.size += 1
             # Touch cluster to update its state in the cache.
             self.id_to_cluster.get(match_cluster.cluster_id)
@@ -326,13 +348,13 @@ class Drain:
 
         return match_cluster, update_type
 
-    def add_log_template(self, content: str, anomaly_level: str):
+    def add_log_template(self, content: str, is_pretrained: bool, anomaly_level):
         content_tokens = self.get_content_as_tokens(content)
         if self.profiler:
             self.profiler.start_section("create_cluster")
         self.clusters_counter += 1
         cluster_id = self.clusters_counter
-        match_cluster = LogCluster(content_tokens, cluster_id, anomaly_level)
+        match_cluster = LogCluster(content_tokens, cluster_id, is_pretrained, anomaly_level)
         self.id_to_cluster[cluster_id] = match_cluster
         self.add_seq_to_prefix_tree(self.root_node, match_cluster)
 
@@ -350,7 +372,15 @@ class Drain:
         """
         content_tokens = self.get_content_as_tokens(content)
         match_cluster = self.tree_search(self.root_node, content_tokens, 1.0, True)
-        return match_cluster
+        if match_cluster:
+            if match_cluster.is_pretrained_template():
+                return match_cluster.get_template(), match_cluster.get_pretrained_anomaly_level(), match_cluster.get_cluster_id()
+            else:
+                message_anomaly_level = match_cluster.get_message_anomaly_level(content)
+                if message_anomaly_level:
+                    return match_cluster.get_template(), message_anomaly_level, match_cluster.get_cluster_id()
+                return None, None, None
+        return None, None, None
 
     def get_total_cluster_size(self):
         size = 0

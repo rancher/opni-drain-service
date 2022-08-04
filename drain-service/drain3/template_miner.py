@@ -27,6 +27,7 @@ class TemplateMiner:
         self,
         persistence_handler: PersistenceHandler = None,
         config: TemplateMinerConfig = None,
+        clusters_counter: int = 0
     ):
         """
         Wrapper for Drain with persistence and masking support
@@ -57,6 +58,7 @@ class TemplateMiner:
             extra_delimiters=self.config.drain_extra_delimiters,
             profiler=self.profiler,
             param_str=param_str,
+            clusters_counter=clusters_counter
         )
         self.last_save_time = time.time()
         if persistence_handler is not None:
@@ -82,7 +84,7 @@ class TemplateMiner:
         # this is only relevant for backwards compatibility when loading a snapshot of drain <= v0.9.1
         # which did not use json-pickle's keys=true
         if len(drain.id_to_cluster) > 0 and isinstance(
-            next(iter(drain.id_to_cluster.keys())), str
+                next(iter(drain.id_to_cluster.keys())), str
         ):
             drain.id_to_cluster = {
                 int(k): v for k, v in list(drain.id_to_cluster.items())
@@ -100,8 +102,20 @@ class TemplateMiner:
                 len(drain.clusters), drain.get_total_cluster_size()
             )
         )
+    def save_state(self):
+        state = jsonpickle.dumps(self.drain, keys=True).encode("utf-8")
+        if self.config.snapshot_compress_state:
+            state = base64.b64encode(zlib.compress(state))
 
-    def save_state(self, snapshot_reason):
+        num_drain_clusters = len(self.drain.clusters)
+
+        logger.info(
+            f"Saving state of {num_drain_clusters} clusters "
+            f"with {self.drain.get_total_cluster_size()} messages, {len(state)} bytes"
+        )
+        self.persistence_handler.save_state(state)
+
+    def save_state_local(self, snapshot_reason, file_path):
         state = jsonpickle.dumps(self.drain, keys=True).encode("utf-8")
         if self.config.snapshot_compress_state:
             state = base64.b64encode(zlib.compress(state))
@@ -113,7 +127,8 @@ class TemplateMiner:
             f"with {self.drain.get_total_cluster_size()} messages, {len(state)} bytes, "
             f"reason: {snapshot_reason}"
         )
-        self.persistence_handler.save_state(state, num_drain_clusters)
+        pathlib.Path(file_path).write_bytes(state)
+
 
     def get_snapshot_reason(self, change_type, cluster_id):
         if change_type != "none":
@@ -125,11 +140,11 @@ class TemplateMiner:
 
         return None
 
-    def add_log_message(self, log_message: str) -> dict:
+    def add_log_message(self, log_message: str, anomaly_level: str) -> dict:
         self.profiler.start_section("total")
 
         self.profiler.start_section("drain")
-        cluster, change_type = self.drain.add_log_message(log_message)
+        cluster, change_type = self.drain.add_log_message(log_message, anomaly_level)
         self.profiler.end_section("drain")
         result = {
             "change_type": change_type,
@@ -138,24 +153,15 @@ class TemplateMiner:
             "template_mined": cluster.get_template(),
             "cluster_count": len(self.drain.clusters),
         }
-
-        if self.persistence_handler is not None:
-            self.profiler.start_section("save_state")
-            snapshot_reason = self.get_snapshot_reason(change_type, cluster.cluster_id)
-            if snapshot_reason:
-                self.save_state(snapshot_reason)
-                self.last_save_time = time.time()
-            self.profiler.end_section()
-
         self.profiler.end_section("total")
         self.profiler.report(self.config.profiling_report_sec)
         return result
 
-    def add_log_template(self, log_template: str, anomaly_level: str) -> dict:
+    def add_log_template(self, log_template: str, pretrained: bool, anomaly_level: str) -> dict:
         self.profiler.start_section("total")
 
         self.profiler.start_section("drain")
-        cluster = self.drain.add_log_template(log_template, anomaly_level)
+        cluster = self.drain.add_log_template(log_template, pretrained, anomaly_level)
         self.profiler.end_section("drain")
         result = {
             "cluster_id": cluster.cluster_id,
@@ -163,14 +169,6 @@ class TemplateMiner:
             "template_mined": cluster.get_template(),
             "cluster_count": len(self.drain.clusters),
         }
-
-        if self.persistence_handler is not None:
-            self.profiler.start_section("save_state")
-            snapshot_reason = self.get_snapshot_reason("cluster_created", cluster.cluster_id)
-            if snapshot_reason:
-                self.save_state(snapshot_reason)
-                self.last_save_time = time.time()
-            self.profiler.end_section()
 
         self.profiler.end_section("total")
         self.profiler.report(self.config.profiling_report_sec)
