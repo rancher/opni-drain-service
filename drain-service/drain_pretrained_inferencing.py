@@ -15,7 +15,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(messa
 nw = NatsWrapper()
 
 def match_template(log_data, template_miner):
-    template, anomaly_level, cluster_id = template_miner.match(log_data.masked_log)
+    result = template_miner.match(log_data.masked_log, log_data.log)
+    template, anomaly_level, cluster_id = result["template"], result["anomaly_level"], result["template_cluster_id"]
     if template:
         log_data.anomaly_level = anomaly_level
         log_data.template_cluster_id = cluster_id
@@ -129,9 +130,8 @@ async def update_model(update_model_logs_queue, current_template_miner):
         inferenced_logs = await update_model_logs_queue.get()
         final_inferenced_logs = []
         for log_data in inferenced_logs.items:
-            log_message = log_data.masked_log
             anomaly_level = log_data.anomaly_level
-            result = current_template_miner.add_log_message(log_message, anomaly_level)
+            result = current_template_miner.add_log_message(log_data.masked_log, log_data.log, anomaly_level)
             log_data.template_matched = result["template_mined"]
             log_data.template_cluster_id = result["cluster_id"]
             final_inferenced_logs.append(log_data)

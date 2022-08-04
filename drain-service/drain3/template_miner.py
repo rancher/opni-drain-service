@@ -140,11 +140,11 @@ class TemplateMiner:
 
         return None
 
-    def add_log_message(self, log_message: str, anomaly_level: str) -> dict:
+    def add_log_message(self, masked_log_message: str, original_log_message: str, anomaly_level: str) -> dict:
         self.profiler.start_section("total")
 
         self.profiler.start_section("drain")
-        cluster, change_type = self.drain.add_log_message(log_message, anomaly_level)
+        cluster, change_type = self.drain.add_log_message(masked_log_message, original_log_message, anomaly_level)
         self.profiler.end_section("drain")
         result = {
             "change_type": change_type,
@@ -174,7 +174,7 @@ class TemplateMiner:
         self.profiler.report(self.config.profiling_report_sec)
         return result
 
-    def match(self, log_message: str) -> LogCluster:
+    def match(self, masked_log_message: str, original_log_message: str) -> LogCluster:
 
         """
         Match against an already existing cluster. Match shall be perfect (sim_th=1.0).
@@ -182,7 +182,7 @@ class TemplateMiner:
         :param log_message: log message to match
         :return: Matched cluster or None of no match found.
         """
-        return self.drain.match(log_message)
+        return self.drain.match(masked_log_message, original_log_message)
 
     def get_parameter_list(self, log_template: str, content: str):
         escaped_prefix = re.escape(self.config.mask_prefix)
