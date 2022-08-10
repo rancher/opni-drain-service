@@ -10,7 +10,7 @@ from drain3.simple_profiler import NullProfiler, Profiler
 
 
 class LogCluster:
-    __slots__ = ["log_template_tokens", "cluster_id", "is_pretrained","pretrained_anomaly_level","size", "cache"]
+    __slots__ = ["log_template_tokens", "cluster_id", "is_pretrained","pretrained_anomaly_level","size", "cache", "max_frequency_original_log", "max_frequency_masked_log", "max_frequency_count"]
 
     def __init__(self, log_template_tokens: list, cluster_id: int, is_pretrained = False, pretrained_anomaly_level=None):
         self.log_template_tokens = tuple(log_template_tokens)
@@ -39,7 +39,6 @@ class LogCluster:
         return self.cache
 
     def add_to_cache(self, masked_message: str, original_message: str, anomaly_level: str):
-        frequency_log_changed = False
         if not masked_message in self.cache:
             self.cache[masked_message] = {"anomaly_level": anomaly_level, "message": original_message, "frequency": 1}
         else:
@@ -50,8 +49,8 @@ class LogCluster:
             if self.max_frequency_masked_log != masked_message:
                 self.max_frequency_masked_log = masked_message
                 self.max_frequency_original_log = original_message
-                frequency_log_changed = True
-        return frequency_log_changed
+                return True
+        return False
 
     def get_message_anomaly_level(self, message: str):
         if message in self.cache:
@@ -390,22 +389,20 @@ class Drain:
         """
         content_tokens = self.get_content_as_tokens(masked_content)
         match_cluster = self.tree_search(self.root_node, content_tokens, 1.0, True)
-        match_results = {"template": None, "anomaly_level": None, "template_cluster_id": None}
+        match_results = {"template": None, "anomaly_level": None, "template_cluster_id": None, "template_log": None}
+        message_anomaly_level = None
         if match_cluster:
             if match_cluster.is_pretrained_template():
                 message_anomaly_level = match_cluster.get_pretrained_anomaly_level()
+            else:
+                message_anomaly_level = match_cluster.get_message_anomaly_level(masked_content)
+            if message_anomaly_level:
                 log_changed = match_cluster.add_to_cache(masked_content, original_content, message_anomaly_level)
                 match_results["template"] = match_cluster.get_template()
                 match_results["anomaly_level"] = message_anomaly_level
                 match_results["template_cluster_id"] = match_cluster.get_cluster_id()
-            else:
-                message_anomaly_level = match_cluster.get_message_anomaly_level(masked_content)
-                if message_anomaly_level:
-                    log_changed = match_cluster.add_to_cache(masked_content, original_content, message_anomaly_level)
-                    match_results["template"] = match_cluster.get_template()
-                    match_results["anomaly_level"] = message_anomaly_level
-                    match_results["template_cluster_id"] = match_cluster.get_cluster_id()
-                    match_results["frequency"]
+                if log_changed:
+                    match_results["template_log"] = match_cluster.get_sample_log()
         return match_results
 
     def get_total_cluster_size(self):

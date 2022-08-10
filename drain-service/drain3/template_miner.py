@@ -152,6 +152,7 @@ class TemplateMiner:
             "cluster_size": cluster.size,
             "template_mined": cluster.get_template(),
             "cluster_count": len(self.drain.clusters),
+            "sample_log": cluster.get_sample_log()
         }
         self.profiler.end_section("total")
         self.profiler.report(self.config.profiling_report_sec)
