@@ -19,7 +19,6 @@ class LogCluster:
         self.pretrained_anomaly_level = pretrained_anomaly_level
         self.cache = dict()
         self.size = 1
-        self.max_frequency_original_log = ""
         self.max_frequency_masked_log = ""
         self.max_frequency_count = -1
 
@@ -48,7 +47,6 @@ class LogCluster:
             self.max_frequency_count = self.cache[masked_message]["frequency"]
             if self.max_frequency_masked_log != masked_message:
                 self.max_frequency_masked_log = masked_message
-                self.max_frequency_original_log = original_message
                 return True
         return False
 
@@ -57,7 +55,7 @@ class LogCluster:
             return self.cache[message]["anomaly_level"]
         return None
     def get_sample_log(self):
-        return self.max_frequency_original_log
+        return self.cache[self.max_frequency_masked_log]["message"]
 
 
     def __str__(self):
