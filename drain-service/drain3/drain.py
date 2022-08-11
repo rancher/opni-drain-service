@@ -10,7 +10,7 @@ from drain3.simple_profiler import NullProfiler, Profiler
 
 
 class LogCluster:
-    __slots__ = ["log_template_tokens", "cluster_id", "is_pretrained","pretrained_anomaly_level","size", "cache", "max_frequency_original_log", "max_frequency_masked_log", "max_frequency_count"]
+    __slots__ = ["log_template_tokens", "cluster_id", "is_pretrained","pretrained_anomaly_level","size", "cache", "max_frequency_masked_log", "max_frequency_count"]
 
     def __init__(self, log_template_tokens: list, cluster_id: int, is_pretrained = False, pretrained_anomaly_level=None):
         self.log_template_tokens = tuple(log_template_tokens)
