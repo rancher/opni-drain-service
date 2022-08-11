@@ -129,128 +129,11 @@ async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
         )
         await nw.publish("anomalies", prediction_payload)
 
-async def setup_es_connection():
-    logging.info("Setting up AsyncElasticsearch")
-    return AsyncElasticsearch(
-        [ES_ENDPOINT],
-        port=9200,
-        http_auth=(ES_USERNAME, ES_PASSWORD),
-        http_compress=True,
-        max_retries=10,
-        retry_on_status={100, 400, 503},
-        retry_on_timeout=True,
-        timeout=20,
-        use_ssl=True,
-        verify_certs=False,
-        sniff_on_start=False,
-        # refresh nodes after a node fails to respond
-        sniff_on_connection_fail=True,
-        # and also every 60 seconds
-        sniffer_timeout=60,
-        sniff_timeout=10,
-    )
 
 
-async def update_es_logs(queue):
-    es = await setup_es_connection()
-
-    async def doc_generator_anomaly(df):
-        for index, document in df.iterrows():
-            doc_dict = document.to_dict()
-            yield doc_dict
-
-    async def doc_generator(df):
-        for index, document in df.iterrows():
-            doc_dict = document.to_dict()
-            doc_dict["doc"] = {}
-            doc_dict["doc"]["drain_matched_template_id"] = doc_dict[
-                "drain_matched_template_id"
-            ]
-            doc_dict["doc"]["drain_matched_template_support"] = doc_dict[
-                "drain_matched_template_support"
-            ]
-            del doc_dict["drain_matched_template_id"]
-            del doc_dict["drain_matched_template_support"]
-            yield doc_dict
-
-    while True:
-        df = await queue.get()
-        df["_op_type"] = "update"
-        df["_index"] = "logs"
-
-        # update anomaly_predicted_count and anomaly_level for anomalous logs
-        anomaly_df = df[df["drain_prediction"] == 1]
-        if len(anomaly_df) == 0:
-            logging.info("No anomalies in this payload")
-        else:
-            script = (
-                "ctx._source.anomaly_predicted_count += 1; ctx._source.drain_anomaly = true; ctx._source.anomaly_level = "
-                "ctx._source.anomaly_predicted_count == 1 ? 'Suspicious' : ctx._source.anomaly_predicted_count == 2 ? "
-                "'Anomaly' : 'Normal';"
-            )
-            anomaly_df["script"] = script
-            try:
-                async for ok, result in async_streaming_bulk(
-                        es,
-                        doc_generator_anomaly(
-                            anomaly_df[["_id", "_op_type", "_index", "script"]]
-                        ),
-                        max_retries=1,
-                        initial_backoff=1,
-                        request_timeout=5,
-                ):
-                    action, result = result.popitem()
-                    if not ok:
-                        logging.error("failed to {} document {}".format())
-                logging.info(f"Updated {len(anomaly_df)} anomalies in ES")
-            except (BulkIndexError, ConnectionTimeout, TimeoutError) as exception:
-                logging.error(
-                    "Failed to index data. Re-adding to logs_to_update_in_elasticsearch queue"
-                )
-                logging.error(exception)
-                await queue.put(anomaly_df)
-            except TransportError as exception:
-                logging.info(f"Error in async_streaming_bulk {exception}")
-                if exception.status_code == "N/A":
-                    logging.info("Elasticsearch connection error")
-                    es = await setup_es_connection()
-
-        try:
-            # update normal logs in ES
-            async for ok, result in async_streaming_bulk(
-                    es,
-                    doc_generator(
-                        df[
-                            [
-                                "_id",
-                                "_op_type",
-                                "_index",
-                                "drain_matched_template_id",
-                                "drain_matched_template_support",
-                            ]
-                        ]
-                    ),
-                    max_retries=1,
-                    initial_backoff=1,
-                    request_timeout=5,
-            ):
-                action, result = result.popitem()
-                if not ok:
-                    logging.error("failed to {} document {}".format())
-            logging.info(f"Updated {len(df)} logs in ES")
-        except (BulkIndexError, ConnectionTimeout) as exception:
-            logging.error("Failed to index data")
-            logging.error(exception)
-            await queue.put(df)
-        except TransportError as exception:
-            logging.info(f"Error in async_streaming_bulk {exception}")
-            if exception.status_code == "N/A":
-                logging.info("Elasticsearch connection error")
-                es = await setup_es_connection()
 
 
 async def training_signal_check():
-    es = await setup_es_connection()
 
     def weighted_avg_and_std(values, weights):
         average = np.average(values, weights=weights)
@@ -369,38 +252,11 @@ async def training_signal_check():
                     "update_type": "training_signal",
                     "timestamp": training_end_ts_ms,
                 }
-                try:
-                    await es.index(
-                        index="opni-drain-model-status", body=drain_status_doc
-                    )
-                except Exception as e:
-                    logging.error(
-                        "Error when indexing status to opni-drain-model-status"
-                    )
 
 
 async def init_nats():
     logging.info("connecting to nats")
     await nw.connect()
-
-
-async def wait_for_index():
-    es = await setup_es_connection()
-    while True:
-        try:
-            exists = await es.indices.exists("opni-normal-intervals")
-            if exists:
-                break
-            else:
-                logging.info("waiting for opni-normal-intervals index")
-                time.sleep(2)
-
-        except TransportError as exception:
-            logging.info(f"Error in es indices {exception}")
-            if exception.status_code == "N/A":
-                logging.info("Elasticsearch connection error")
-                es = await setup_es_connection()
-
 
 def main():
     fail_keywords_str = ""
@@ -422,7 +278,6 @@ def main():
     loop.run_until_complete(
         asyncio.gather(
             init_nats(),
-            wait_for_index(),
         )
     )
 
@@ -432,14 +287,12 @@ def main():
     train_coroutine = train_and_inference(
         incoming_logs_to_train_queue, fail_keywords_str
     )
-    update_es_coroutine = update_es_logs(logs_to_update_in_elasticsearch)
     training_signal_coroutine = training_signal_check()
 
     loop.run_until_complete(
         asyncio.gather(
             preprocessed_logs_consumer_coroutine,
             train_coroutine,
-            update_es_coroutine,
             training_signal_coroutine,
         )
     )
