@@ -101,6 +101,7 @@ async def inference_logs(incoming_logs_queue, pretrained_template_miner, current
         logging.info("Received payload of size {}".format(len(logs_payload.items)))
         cp_model_logs = []
         rancher_model_logs = []
+        longhorn_model_logs = []
         for log_data in logs_payload.items:
             log_message = log_data.masked_log
             if log_message:
@@ -120,6 +121,8 @@ async def inference_logs(incoming_logs_queue, pretrained_template_miner, current
                             cp_model_logs.append(log_data)
                         elif log_data.log_type == "rancher":
                             rancher_model_logs.append(log_data)
+                        elif log_data.log_type == "longhorn":
+                            longhorn_model_logs.append(log_data)
         if (start_time - last_time >= 1) or len(logs_inferenced_results) >= 128 or len(log_templates_modified) >= 128:
             if len(logs_inferenced_results) > 0:
                 await nw.publish("inferenced_logs", bytes(PayloadList(items=logs_inferenced_results)))
@@ -133,8 +136,10 @@ async def inference_logs(incoming_logs_queue, pretrained_template_miner, current
             logging.info(f"Published {len(cp_model_logs)} logs to be inferenced on by Control Plane Deep Learning model.")
         if len(rancher_model_logs) > 0:
             await nw.publish("opnilog_rancher_logs", bytes(PayloadList(items = rancher_model_logs)))
-
             logging.info(f"Published {len(rancher_model_logs)} logs to be inferenced on by Rancher Deep Learning model.")
+        if len(longhorn_model_logs) > 0:
+            await nw.publish("opnilog_longhorn_logs", bytes(PayloadList(items = longhorn_model_logs)))
+            logging.info(f"Published {len(longhorn_model_logs)} logs to be inferenced on by Longhorn Deep Learning model.")
         logging.info(f"{len(logs_payload.items)} logs processed in {(time.time() - start_time)} second(s)")
 
 
