@@ -24,6 +24,7 @@ template_miner = TemplateMiner(persistence)
 ES_ENDPOINT = os.environ["ES_ENDPOINT"]
 ES_USERNAME = os.environ["ES_USERNAME"]
 ES_PASSWORD = os.environ["ES_PASSWORD"]
+TRAINING_TIME_INTERVAL = 86400
 if "RETRAIN_OFTEN" in os.environ:
     RETRAIN_OFTEN = os.environ["RETRAIN_OFTEN"].lower() == "true"
 else:
@@ -37,28 +38,17 @@ num_total_clusters_tracking_queue = deque([], 200)
 nw = NatsWrapper()
 
 
-async def consume_logs(incoming_logs_to_train_queue, logs_to_update_es):
+async def consume_logs(incoming_logs_to_train_queue):
     async def subscribe_handler(msg):
         payload_data = msg.data.decode()
         await incoming_logs_to_train_queue.put(
             pd.read_json(payload_data, dtype={"_id": object, "cluster_id": str})
         )
 
-    async def anomalies_subscription_handler(msg):
-        anomalies_data = msg.data.decode()
-        logging.info("got anomaly payload")
-        await logs_to_update_es.put(pd.read_json(anomalies_data, {"_id": object, "cluster_id": str}))
-
     await nw.subscribe(
-        nats_subject="preprocessed_logs",
+        nats_subject="preprocessed_logs_workload",
         payload_queue=None,
         subscribe_handler=subscribe_handler,
-    )
-
-    await nw.subscribe(
-        nats_subject="anomalies",
-        payload_queue=None,
-        subscribe_handler=anomalies_subscription_handler,
     )
 
 
@@ -130,10 +120,13 @@ async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
         await nw.publish("anomalies", prediction_payload)
 
 
-
-
-
 async def training_signal_check():
+    while True:
+        print("a")
+    return
+
+
+async def volatility_training_signal_check():
 
     def weighted_avg_and_std(values, weights):
         average = np.average(values, weights=weights)
@@ -288,12 +281,13 @@ def main():
         incoming_logs_to_train_queue, fail_keywords_str
     )
     training_signal_coroutine = training_signal_check()
+    volatility_training_signal_coroutine = volatility_training_signal_check()
 
     loop.run_until_complete(
         asyncio.gather(
             preprocessed_logs_consumer_coroutine,
             train_coroutine,
-            training_signal_coroutine,
+            volatility_training_signal_coroutine,
         )
     )
     try:
