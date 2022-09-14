@@ -15,16 +15,11 @@ import ruptures as rpt
 from drain3.file_persistence import FilePersistence
 from drain3.template_miner import TemplateMiner
 from opni_nats import NatsWrapper
+from opni_proto.log_anomaly_payload_pb import Payload, PayloadList
 
 pd.set_option("mode.chained_assignment", None)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
-persistence = FilePersistence("drain3_state.bin")
-template_miner = TemplateMiner(persistence)
-ES_ENDPOINT = os.environ["ES_ENDPOINT"]
-ES_USERNAME = os.environ["ES_USERNAME"]
-ES_PASSWORD = os.environ["ES_PASSWORD"]
-TRAINING_TIME_INTERVAL = 86400
 if "RETRAIN_OFTEN" in os.environ:
     RETRAIN_OFTEN = os.environ["RETRAIN_OFTEN"].lower() == "true"
 else:
@@ -34,16 +29,51 @@ num_no_templates_change_tracking_queue = deque([], 50)
 num_templates_changed_tracking_queue = deque([], 50)
 num_clusters_created_tracking_queue = deque([], 50)
 num_total_clusters_tracking_queue = deque([], 200)
+resources_to_track = []
 
 nw = NatsWrapper()
 
+def match_template(log_data, template_miner):
+    result = template_miner.match(log_data.masked_log, log_data.log)
+    template, anomaly_level, cluster_id, template_log = result["template"], result["anomaly_level"], result["template_cluster_id"], result["template_log"]
+    if template:
+        log_data.anomaly_level = anomaly_level
+        log_data.template_cluster_id = cluster_id
+        log_data.template_matched = template
+        log_data.inference_model = "drain"
+        if template_log:
+            template_log_payload = Payload(log=template_log, template_matched=template, template_cluster_id=cluster_id, _id=str(cluster_id))
+            return True, template_log_payload
+        return True, None
+    return False, None
 
-async def consume_logs(incoming_logs_to_train_queue):
+
+async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, batch_processed_queue):
     async def subscribe_handler(msg):
-        payload_data = msg.data.decode()
+        payload_data = msg.data
+        logs_payload_list = PayloadList()
+        logs_payload = logs_payload_list.parse(payload_data)
         await incoming_logs_to_train_queue.put(
-            pd.read_json(payload_data, dtype={"_id": object, "cluster_id": str})
+            logs_payload
         )
+    async def inferenced_subscribe_handler(msg):
+        payload_data = msg.data
+        logs_payload_list = PayloadList()
+        logs_payload = logs_payload_list.parse(payload_data)
+        await update_model_logs_queue.put(logs_payload)
+
+    await nw.subscribe(
+        nats_subject="batch_processed_workload",
+        nats_queue="workers",
+        payload_queue=batch_processed_queue
+    )
+
+    await nw.subscribe(
+        nats_subject="model_inferenced_workload_logs",
+        nats_queue="workers",
+        payload_queue=update_model_logs_queue,
+        subscribe_handler=inferenced_subscribe_handler,
+    )
 
     await nw.subscribe(
         nats_subject="preprocessed_logs_workload",
@@ -51,18 +81,89 @@ async def consume_logs(incoming_logs_to_train_queue):
         subscribe_handler=subscribe_handler,
     )
 
+async def persist_model(batch_processed_queue, current_template_miner):
+    last_upload = time.time()
+    while True:
+        processed_payload = await batch_processed_queue.get()
+        current_time = time.time()
+        if current_time - last_upload >= 3600:
+            current_template_miner.save_state()
+            last_upload = time.time()
 
+async def inference_logs(incoming_logs_queue, workload_template_miner):
+    '''
+        This function will be inferencing on logs which are sent over through Nats and using the DRAIN model to match the logs to a template.
+        If no match is made, the log is then sent over to be inferenced on by the Deep Learning model.
+    '''
+    last_time = time.time()
+    logs_inferenced_results = []
+    log_templates_modified = []
+    workload_model_logs = []
+    while True:
+        logs_payload = await incoming_logs_queue.get()
+        start_time = time.time()
+        logging.info("Received payload of size {}".format(len(logs_payload.items)))
+        for log_data in logs_payload.items:
+            log_message = log_data.masked_log
+            if log_message:
+                current_template_matched, current_template_payload = match_template(log_data, workload_template_miner)
+                if current_template_matched:
+                    logs_inferenced_results.append(log_data)
+                    logging.info(log_data.template_matched)
+                    if current_template_payload:
+                        log_templates_modified.append(current_template_payload)
+                else:
+                    workload_model_logs.append(log_data)
+        logging.info(len(workload_model_logs))
+        logging.info(logs_inferenced_results)
+        if (start_time - last_time >= 1) or len(logs_inferenced_results) >= 128 or len(log_templates_modified) >= 128:
+            if len(logs_inferenced_results) > 0:
+                await nw.publish("inferenced_logs", bytes(PayloadList(items=logs_inferenced_results)))
+                logs_inferenced_results = []
+            if len(log_templates_modified) > 0:
+                await nw.publish("templates_index", bytes(PayloadList(items=log_templates_modified)))
+                log_templates_modified = []
+            last_time = start_time
+        if len(workload_model_logs) > 0:
+            await nw.publish("opnilog_workload_logs", bytes(PayloadList(items = workload_model_logs)))
+            logging.info(f"Published {len(workload_model_logs)} logs to be inferenced on by Workload Deep Learning model.")
+
+        logging.info(f"{len(logs_payload.items)} logs processed in {(time.time() - start_time)} second(s)")
+
+async def update_model(update_model_logs_queue, workload_template_miner):
+    '''
+    This function will process logs that were passed back by the Inferencing service. These log messages will be
+    added to the pretrained DRAIN model in addition to the predicted anomaly level as well.
+    '''
+    while True:
+        inferenced_logs = await update_model_logs_queue.get()
+        final_inferenced_logs = []
+        template_data = []
+        for log_data in inferenced_logs.items:
+            anomaly_level = log_data.anomaly_level
+            result = workload_template_miner.add_log_message(log_data.masked_log, log_data.log, anomaly_level)
+            log_data.template_matched = result["template_mined"]
+            log_data.template_cluster_id = result["cluster_id"]
+            if result["change_type"] == "cluster_created" or result["change_type"] == "cluster_template_changed":
+                template_data.append(Payload(log=result["sample_log"], template_matched=result["template_mined"], template_cluster_id=result["cluster_id"], _id="0{}".format(result["cluster_id"]), log_type=log_data.log_type))
+            final_inferenced_logs.append(log_data)
+        await nw.publish("inferenced_logs", bytes(PayloadList(items = final_inferenced_logs)))
+        await nw.publish("batch_processed_workload", "processed".encode())
+        if len(template_data) > 0:
+            await nw.publish("templates_index", bytes(PayloadList(items=template_data)))
+
+'''
 async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
     global num_no_templates_change_tracking_queue, num_templates_changed_tracking_queue, num_clusters_created_tracking_queue
     while True:
-        payload_data_df = await incoming_logs_to_train_queue.get()
+        logs_payload = await incoming_logs_to_train_queue.get()
         inferencing_results = []
-        for index, row in payload_data_df.iterrows():
-            log_message = row["masked_log"]
+        for log_data in logs_payload.iterrows():
+            log_message = log_data.masked_log
             if log_message:
                 result = template_miner.add_log_message(log_message)
                 d = {
-                    "_id": row["_id"],
+                    "_id": log_data.["_id"],
                     "update_type": result["change_type"],
                     "template_or_change_type": result
                     if result == "cluster_created"
@@ -118,15 +219,9 @@ async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
                 .encode()
         )
         await nw.publish("anomalies", prediction_payload)
+'''
 
-
-async def training_signal_check():
-    while True:
-        print("a")
-    return
-
-
-async def volatility_training_signal_check():
+async def training_signal_check(workload_template_miner):
 
     def weighted_avg_and_std(values, weights):
         average = np.average(values, weights=weights)
@@ -146,7 +241,7 @@ async def volatility_training_signal_check():
 
     while True:
         await asyncio.sleep(20)
-        num_drain_templates = len(template_miner.drain.clusters)
+        num_drain_templates = len(workload_template_miner.drain.clusters)
         if len(num_total_clusters_tracking_queue) == 0 and num_drain_templates == 0:
             logging.info("No DRAIN templates learned yet")
             continue
@@ -261,11 +356,13 @@ def main():
         else:
             fail_keywords_str += f"({fail_keyword})"
     logging.info(f"fail_keywords_str = {fail_keywords_str}")
-
+    persistence = FilePersistence("workload_drain_model.bin")
+    workload_template_miner = TemplateMiner(persistence)
     loop = asyncio.get_event_loop()
-    incoming_logs_to_train_queue = asyncio.Queue(loop=loop)
-    model_to_save_queue = asyncio.Queue(loop=loop)
-    logs_to_update_in_elasticsearch = asyncio.Queue(loop=loop)
+    incoming_logs_queue = asyncio.Queue(loop=loop)
+    update_model_queue = asyncio.Queue(loop=loop)
+    batch_processed_queue = asyncio.Queue(loop=loop)
+
 
     # Run initialization tasks
     loop.run_until_complete(
@@ -274,20 +371,15 @@ def main():
         )
     )
 
-    preprocessed_logs_consumer_coroutine = consume_logs(
-        incoming_logs_to_train_queue, logs_to_update_in_elasticsearch
-    )
-    train_coroutine = train_and_inference(
-        incoming_logs_to_train_queue, fail_keywords_str
-    )
-    training_signal_coroutine = training_signal_check()
-    volatility_training_signal_coroutine = volatility_training_signal_check()
+    preprocessed_logs_consumer_coroutine = consume_logs(incoming_logs_queue, update_model_queue, batch_processed_queue)
+    inference_coroutine = inference_logs(incoming_logs_queue, workload_template_miner)
+    update_model_coroutine = update_model(update_model_queue, workload_template_miner)
+    persist_model_coroutine = persist_model(batch_processed_queue, workload_template_miner)
+    #training_signal_coroutine = training_signal_check(workload_template_miner)
 
     loop.run_until_complete(
         asyncio.gather(
-            preprocessed_logs_consumer_coroutine,
-            train_coroutine,
-            volatility_training_signal_coroutine,
+            preprocessed_logs_consumer_coroutine,inference_coroutine, update_model_coroutine, persist_model_coroutine,
         )
     )
     try:

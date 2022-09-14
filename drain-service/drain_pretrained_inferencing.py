@@ -71,7 +71,7 @@ async def consume_logs(incoming_cp_logs_queue, update_model_logs_queue, batch_pr
     )
 
     await nw.subscribe(
-        nats_subject="model_inferenced_logs",
+        nats_subject="model_inferenced_pretrained_logs",
         nats_queue="workers",
         payload_queue=update_model_logs_queue,
         subscribe_handler=inferenced_subscribe_handler,
@@ -158,9 +158,9 @@ async def update_model(update_model_logs_queue, current_template_miner):
             log_data.template_matched = result["template_mined"]
             log_data.template_cluster_id = result["cluster_id"]
             if result["change_type"] == "cluster_created" or result["change_type"] == "cluster_template_changed":
-                template_data.append(Payload(log=result["sample_log"], template_matched=result["template_mined"], template_cluster_id=result["cluster_id"], _id=str(result["cluster_id"])))
+                template_data.append(Payload(log=result["sample_log"], template_matched=result["template_mined"], template_cluster_id=result["cluster_id"], _id=str(result["cluster_id"]), log_type=log_data.log_type))
             final_inferenced_logs.append(log_data)
-        await nw.publish("inferenced_logs", bytes(PayloadList(items = final_inferenced_logs)))
+        await nw.publish("inferenced_logs", bytes(PayloadList(items=final_inferenced_logs)))
         await nw.publish("batch_processed", "processed".encode())
         if len(template_data) > 0:
             await nw.publish("templates_index", bytes(PayloadList(items=template_data)))
