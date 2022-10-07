@@ -127,6 +127,7 @@ async def inference_logs(incoming_logs_queue, workload_template_miner):
         if len(workload_model_logs) > 0:
             await nw.publish("opnilog_workload_logs", bytes(PayloadList(items = workload_model_logs)))
             logging.info(f"Published {len(workload_model_logs)} logs to be inferenced on by Workload Deep Learning model.")
+            workload_model_logs = []
 
         logging.info(f"{len(logs_payload.items)} logs processed in {(time.time() - start_time)} second(s)")
 
@@ -221,6 +222,8 @@ async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
         await nw.publish("anomalies", prediction_payload)
 '''
 
+
+'''
 async def training_signal_check(workload_template_miner):
 
     def weighted_avg_and_std(values, weights):
@@ -340,7 +343,7 @@ async def training_signal_check(workload_template_miner):
                     "update_type": "training_signal",
                     "timestamp": training_end_ts_ms,
                 }
-
+'''
 
 async def init_nats():
     logging.info("connecting to nats")
