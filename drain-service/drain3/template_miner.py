@@ -63,6 +63,17 @@ class TemplateMiner:
         self.last_save_time = time.time()
         if persistence_handler is not None:
             self.load_state()
+    def reset_model(self):
+        self.drain = Drain(
+            sim_th=self.config.drain_sim_th,
+            depth=self.config.drain_depth,
+            max_children=self.config.drain_max_children,
+            max_clusters=self.config.drain_max_clusters,
+            extra_delimiters=self.config.drain_extra_delimiters,
+            profiler=self.profiler,
+            param_str= self.config.mask_prefix + "*" + self.config.mask_suffix,
+            clusters_counter=0
+        )
 
     def load_state(self, control_plane_binary_path=None):
         logger.info("Checking for saved state")

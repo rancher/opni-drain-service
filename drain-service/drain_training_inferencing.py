@@ -48,7 +48,7 @@ def match_template(log_data, template_miner):
     return False, None
 
 
-async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, batch_processed_queue):
+async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, batch_processed_queue, model_trained_queue):
     async def subscribe_handler(msg):
         payload_data = msg.data
         logs_payload_list = PayloadList()
@@ -64,7 +64,6 @@ async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, ba
 
     await nw.subscribe(
         nats_subject="batch_processed_workload",
-        nats_queue="workers",
         payload_queue=batch_processed_queue
     )
 
@@ -81,6 +80,8 @@ async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, ba
         subscribe_handler=subscribe_handler,
     )
 
+    await nw.subscribe(nats_subject="workload_parameters", payload_queue=model_trained_queue)
+
 async def persist_model(batch_processed_queue, current_template_miner):
     last_upload = time.time()
     while True:
@@ -89,6 +90,12 @@ async def persist_model(batch_processed_queue, current_template_miner):
         if current_time - last_upload >= 3600:
             current_template_miner.save_state()
             last_upload = time.time()
+
+async def reset_model(model_training_signal_queue, current_template_miner):
+    while True:
+        payload = await model_training_signal_queue.get()
+        current_template_miner.reset_model()
+        current_template_miner.save_state()
 
 async def inference_logs(incoming_logs_queue, workload_template_miner):
     '''
@@ -103,19 +110,17 @@ async def inference_logs(incoming_logs_queue, workload_template_miner):
         logs_payload = await incoming_logs_queue.get()
         start_time = time.time()
         logging.info("Received payload of size {}".format(len(logs_payload.items)))
+        logging.info(workload_template_miner.drain.clusters_counter)
         for log_data in logs_payload.items:
             log_message = log_data.masked_log
             if log_message:
                 current_template_matched, current_template_payload = match_template(log_data, workload_template_miner)
                 if current_template_matched:
                     logs_inferenced_results.append(log_data)
-                    logging.info(log_data.template_matched)
                     if current_template_payload:
                         log_templates_modified.append(current_template_payload)
                 else:
                     workload_model_logs.append(log_data)
-        logging.info(len(workload_model_logs))
-        logging.info(logs_inferenced_results)
         if (start_time - last_time >= 1) or len(logs_inferenced_results) >= 128 or len(log_templates_modified) >= 128:
             if len(logs_inferenced_results) > 0:
                 await nw.publish("inferenced_logs", bytes(PayloadList(items=logs_inferenced_results)))
@@ -360,11 +365,13 @@ def main():
             fail_keywords_str += f"({fail_keyword})"
     logging.info(f"fail_keywords_str = {fail_keywords_str}")
     persistence = FilePersistence("workload_drain_model.bin")
+
     workload_template_miner = TemplateMiner(persistence)
     loop = asyncio.get_event_loop()
     incoming_logs_queue = asyncio.Queue(loop=loop)
     update_model_queue = asyncio.Queue(loop=loop)
     batch_processed_queue = asyncio.Queue(loop=loop)
+    model_training_signal_queue = asyncio.Queue(loop=loop)
 
 
     # Run initialization tasks
@@ -374,15 +381,16 @@ def main():
         )
     )
 
-    preprocessed_logs_consumer_coroutine = consume_logs(incoming_logs_queue, update_model_queue, batch_processed_queue)
+    preprocessed_logs_consumer_coroutine = consume_logs(incoming_logs_queue, update_model_queue, batch_processed_queue, model_training_signal_queue)
     inference_coroutine = inference_logs(incoming_logs_queue, workload_template_miner)
     update_model_coroutine = update_model(update_model_queue, workload_template_miner)
     persist_model_coroutine = persist_model(batch_processed_queue, workload_template_miner)
+    reset_model_coroutine = reset_model(model_training_signal_queue, workload_template_miner)
     #training_signal_coroutine = training_signal_check(workload_template_miner)
 
     loop.run_until_complete(
         asyncio.gather(
-            preprocessed_logs_consumer_coroutine,inference_coroutine, update_model_coroutine, persist_model_coroutine,
+            preprocessed_logs_consumer_coroutine,inference_coroutine, update_model_coroutine, persist_model_coroutine, reset_model_coroutine
         )
     )
     try:
