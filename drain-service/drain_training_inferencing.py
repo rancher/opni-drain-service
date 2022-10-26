@@ -110,7 +110,6 @@ async def inference_logs(incoming_logs_queue, workload_template_miner):
         logs_payload = await incoming_logs_queue.get()
         start_time = time.time()
         logging.info("Received payload of size {}".format(len(logs_payload.items)))
-        logging.info(workload_template_miner.drain.clusters_counter)
         for log_data in logs_payload.items:
             log_message = log_data.masked_log
             if log_message:
@@ -386,7 +385,6 @@ def main():
     update_model_coroutine = update_model(update_model_queue, workload_template_miner)
     persist_model_coroutine = persist_model(batch_processed_queue, workload_template_miner)
     reset_model_coroutine = reset_model(model_training_signal_queue, workload_template_miner)
-    #training_signal_coroutine = training_signal_check(workload_template_miner)
 
     loop.run_until_complete(
         asyncio.gather(
