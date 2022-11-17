@@ -62,6 +62,10 @@ async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, ba
         logs_payload = logs_payload_list.parse(payload_data)
         await update_model_logs_queue.put(logs_payload)
 
+    async def model_subscribe_handler(msg):
+        result = json.loads(msg.data.decode())
+        await model_trained_queue.put(result)
+
     await nw.subscribe(
         nats_subject="batch_processed_workload",
         payload_queue=batch_processed_queue
@@ -80,7 +84,11 @@ async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, ba
         subscribe_handler=subscribe_handler,
     )
 
-    await nw.subscribe(nats_subject="workload_parameters", payload_queue=model_trained_queue)
+    await nw.subscribe(
+        nats_subject="model_workload_parameters",
+        payload_queue=model_trained_queue,
+        subscribe_handler=model_subscribe_handler
+    )
 
 async def persist_model(batch_processed_queue, current_template_miner):
     last_upload = time.time()
@@ -94,8 +102,11 @@ async def persist_model(batch_processed_queue, current_template_miner):
 async def reset_model(model_training_signal_queue, current_template_miner):
     while True:
         payload = await model_training_signal_queue.get()
-        current_template_miner.reset_model()
-        current_template_miner.save_state()
+        if payload is None:
+            break
+        if payload["status_type"] == "train" or payload["status_type"] == "reset":
+            current_template_miner.reset_model()
+            current_template_miner.save_state()
 
 async def inference_logs(incoming_logs_queue, workload_template_miner):
     '''
