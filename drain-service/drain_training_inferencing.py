@@ -48,7 +48,7 @@ def match_template(log_data, template_miner):
     return False, None
 
 
-async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, batch_processed_queue, model_trained_queue):
+async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, batch_processed_queue, model_training_signal_queue):
     async def subscribe_handler(msg):
         payload_data = msg.data
         logs_payload_list = PayloadList()
@@ -64,7 +64,7 @@ async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, ba
 
     async def model_subscribe_handler(msg):
         result = json.loads(msg.data.decode())
-        await model_trained_queue.put(result)
+        await model_training_signal_queue.put(result)
 
     await nw.subscribe(
         nats_subject="batch_processed_workload",
@@ -86,7 +86,7 @@ async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, ba
 
     await nw.subscribe(
         nats_subject="model_workload_parameters",
-        payload_queue=model_trained_queue,
+        payload_queue=model_training_signal_queue,
         subscribe_handler=model_subscribe_handler
     )
 
@@ -103,7 +103,7 @@ async def reset_model(model_training_signal_queue, current_template_miner):
     while True:
         payload = await model_training_signal_queue.get()
         if payload is None:
-            break
+            continue
         if payload["status_type"] == "train" or payload["status_type"] == "reset":
             current_template_miner.reset_model()
             current_template_miner.save_state()
