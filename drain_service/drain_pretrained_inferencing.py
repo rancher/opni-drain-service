@@ -33,7 +33,7 @@ def load_pretrain_model():
     # This function will load the pretrained DRAIN model for control plane logs in addition to the anomaly level for each template.
     try:
         pretrained_template_miner = TemplateMiner()
-        pretrained_template_miner.load_state("drain3_pretrained_model_v0.6.0.bin")
+        pretrained_template_miner.load_state("drain3_pretrained_model_v0.6.1.bin")
         num_pretrained_clusters = pretrained_template_miner.drain.clusters_counter
         logging.info("Able to load the DRAIN control plane model with {} clusters.".format(num_pretrained_clusters))
         persistence = FilePersistence("drain3_non_workload_model.bin")
@@ -71,7 +71,7 @@ async def consume_logs(incoming_cp_logs_queue, update_model_logs_queue, batch_pr
     )
 
     await nw.subscribe(
-        nats_subject="model_inferenced_logs",
+        nats_subject="model_inferenced_pretrained_logs",
         nats_queue="workers",
         payload_queue=update_model_logs_queue,
         subscribe_handler=inferenced_subscribe_handler,
@@ -158,9 +158,9 @@ async def update_model(update_model_logs_queue, current_template_miner):
             log_data.template_matched = result["template_mined"]
             log_data.template_cluster_id = result["cluster_id"]
             if result["change_type"] == "cluster_created" or result["change_type"] == "cluster_template_changed":
-                template_data.append(Payload(log=result["sample_log"], template_matched=result["template_mined"], template_cluster_id=result["cluster_id"], _id=str(result["cluster_id"])))
+                template_data.append(Payload(log=result["sample_log"], template_matched=result["template_mined"], template_cluster_id=result["cluster_id"], _id=str(result["cluster_id"]), log_type=log_data.log_type))
             final_inferenced_logs.append(log_data)
-        await nw.publish("inferenced_logs", bytes(PayloadList(items = final_inferenced_logs)))
+        await nw.publish("inferenced_logs", bytes(PayloadList(items=final_inferenced_logs)))
         await nw.publish("batch_processed", "processed".encode())
         if len(template_data) > 0:
             await nw.publish("templates_index", bytes(PayloadList(items=template_data)))

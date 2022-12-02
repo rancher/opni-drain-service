@@ -15,15 +15,11 @@ import ruptures as rpt
 from drain3.file_persistence import FilePersistence
 from drain3.template_miner import TemplateMiner
 from opni_nats import NatsWrapper
+from opni_proto.log_anomaly_payload_pb import Payload, PayloadList
 
 pd.set_option("mode.chained_assignment", None)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
-persistence = FilePersistence("drain3_state.bin")
-template_miner = TemplateMiner(persistence)
-ES_ENDPOINT = os.environ["ES_ENDPOINT"]
-ES_USERNAME = os.environ["ES_USERNAME"]
-ES_PASSWORD = os.environ["ES_PASSWORD"]
 if "RETRAIN_OFTEN" in os.environ:
     RETRAIN_OFTEN = os.environ["RETRAIN_OFTEN"].lower() == "true"
 else:
@@ -33,46 +29,157 @@ num_no_templates_change_tracking_queue = deque([], 50)
 num_templates_changed_tracking_queue = deque([], 50)
 num_clusters_created_tracking_queue = deque([], 50)
 num_total_clusters_tracking_queue = deque([], 200)
+resources_to_track = []
 
 nw = NatsWrapper()
 
+def match_template(log_data, template_miner):
+    result = template_miner.match(log_data.masked_log, log_data.log)
+    template, anomaly_level, cluster_id, template_log = result["template"], result["anomaly_level"], result["template_cluster_id"], result["template_log"]
+    if template:
+        log_data.anomaly_level = anomaly_level
+        log_data.template_cluster_id = cluster_id
+        log_data.template_matched = template
+        log_data.inference_model = "drain"
+        if template_log:
+            template_log_payload = Payload(log=template_log, template_matched=template, template_cluster_id=cluster_id, _id=str(cluster_id))
+            return True, template_log_payload
+        return True, None
+    return False, None
 
-async def consume_logs(incoming_logs_to_train_queue, logs_to_update_es):
+
+async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, batch_processed_queue, model_training_signal_queue):
     async def subscribe_handler(msg):
-        payload_data = msg.data.decode()
+        payload_data = msg.data
+        logs_payload_list = PayloadList()
+        logs_payload = logs_payload_list.parse(payload_data)
         await incoming_logs_to_train_queue.put(
-            pd.read_json(payload_data, dtype={"_id": object, "cluster_id": str})
+            logs_payload
         )
+    async def inferenced_subscribe_handler(msg):
+        payload_data = msg.data
+        logs_payload_list = PayloadList()
+        logs_payload = logs_payload_list.parse(payload_data)
+        await update_model_logs_queue.put(logs_payload)
 
-    async def anomalies_subscription_handler(msg):
-        anomalies_data = msg.data.decode()
-        logging.info("got anomaly payload")
-        await logs_to_update_es.put(pd.read_json(anomalies_data, {"_id": object, "cluster_id": str}))
+    async def model_subscribe_handler(msg):
+        result = json.loads(msg.data.decode())
+        await model_training_signal_queue.put(result)
 
     await nw.subscribe(
-        nats_subject="preprocessed_logs",
+        nats_subject="batch_processed_workload",
+        payload_queue=batch_processed_queue
+    )
+
+    await nw.subscribe(
+        nats_subject="model_inferenced_workload_logs",
+        nats_queue="workers",
+        payload_queue=update_model_logs_queue,
+        subscribe_handler=inferenced_subscribe_handler,
+    )
+
+    await nw.subscribe(
+        nats_subject="preprocessed_logs_workload",
         payload_queue=None,
         subscribe_handler=subscribe_handler,
     )
 
     await nw.subscribe(
-        nats_subject="anomalies",
-        payload_queue=None,
-        subscribe_handler=anomalies_subscription_handler,
+        nats_subject="model_workload_parameters",
+        payload_queue=model_training_signal_queue,
+        subscribe_handler=model_subscribe_handler
     )
 
+async def persist_model(batch_processed_queue, current_template_miner):
+    last_upload = time.time()
+    while True:
+        processed_payload = await batch_processed_queue.get()
+        current_time = time.time()
+        if current_time - last_upload >= 3600:
+            current_template_miner.save_state()
+            last_upload = time.time()
 
+async def reset_model(model_training_signal_queue, current_template_miner):
+    while True:
+        payload = await model_training_signal_queue.get()
+        if payload is None:
+            continue
+        if payload["status_type"] == "train" or payload["status_type"] == "reset":
+            current_template_miner.reset_model()
+            current_template_miner.save_state()
+
+async def inference_logs(incoming_logs_queue, workload_template_miner):
+    '''
+        This function will be inferencing on logs which are sent over through Nats and using the DRAIN model to match the logs to a template.
+        If no match is made, the log is then sent over to be inferenced on by the Deep Learning model.
+    '''
+    last_time = time.time()
+    logs_inferenced_results = []
+    log_templates_modified = []
+    workload_model_logs = []
+    while True:
+        logs_payload = await incoming_logs_queue.get()
+        start_time = time.time()
+        logging.info("Received payload of size {}".format(len(logs_payload.items)))
+        for log_data in logs_payload.items:
+            log_message = log_data.masked_log
+            if log_message:
+                current_template_matched, current_template_payload = match_template(log_data, workload_template_miner)
+                if current_template_matched:
+                    logs_inferenced_results.append(log_data)
+                    if current_template_payload:
+                        log_templates_modified.append(current_template_payload)
+                else:
+                    workload_model_logs.append(log_data)
+        if (start_time - last_time >= 1) or len(logs_inferenced_results) >= 128 or len(log_templates_modified) >= 128:
+            if len(logs_inferenced_results) > 0:
+                await nw.publish("inferenced_logs", bytes(PayloadList(items=logs_inferenced_results)))
+                logs_inferenced_results = []
+            if len(log_templates_modified) > 0:
+                await nw.publish("templates_index", bytes(PayloadList(items=log_templates_modified)))
+                log_templates_modified = []
+            last_time = start_time
+        if len(workload_model_logs) > 0:
+            await nw.publish("opnilog_workload_logs", bytes(PayloadList(items = workload_model_logs)))
+            logging.info(f"Published {len(workload_model_logs)} logs to be inferenced on by Workload Deep Learning model.")
+            workload_model_logs = []
+
+        logging.info(f"{len(logs_payload.items)} logs processed in {(time.time() - start_time)} second(s)")
+
+async def update_model(update_model_logs_queue, workload_template_miner):
+    '''
+    This function will process logs that were passed back by the Inferencing service. These log messages will be
+    added to the pretrained DRAIN model in addition to the predicted anomaly level as well.
+    '''
+    while True:
+        inferenced_logs = await update_model_logs_queue.get()
+        final_inferenced_logs = []
+        template_data = []
+        for log_data in inferenced_logs.items:
+            anomaly_level = log_data.anomaly_level
+            result = workload_template_miner.add_log_message(log_data.masked_log, log_data.log, anomaly_level)
+            log_data.template_matched = result["template_mined"]
+            log_data.template_cluster_id = result["cluster_id"]
+            if result["change_type"] == "cluster_created" or result["change_type"] == "cluster_template_changed":
+                template_data.append(Payload(log=result["sample_log"], template_matched=result["template_mined"], template_cluster_id=result["cluster_id"], _id="0{}".format(result["cluster_id"]), log_type=log_data.log_type))
+            final_inferenced_logs.append(log_data)
+        await nw.publish("inferenced_logs", bytes(PayloadList(items = final_inferenced_logs)))
+        await nw.publish("batch_processed_workload", "processed".encode())
+        if len(template_data) > 0:
+            await nw.publish("templates_index", bytes(PayloadList(items=template_data)))
+
+'''
 async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
     global num_no_templates_change_tracking_queue, num_templates_changed_tracking_queue, num_clusters_created_tracking_queue
     while True:
-        payload_data_df = await incoming_logs_to_train_queue.get()
+        logs_payload = await incoming_logs_to_train_queue.get()
         inferencing_results = []
-        for index, row in payload_data_df.iterrows():
-            log_message = row["masked_log"]
+        for log_data in logs_payload.iterrows():
+            log_message = log_data.masked_log
             if log_message:
                 result = template_miner.add_log_message(log_message)
                 d = {
-                    "_id": row["_id"],
+                    "_id": log_data.["_id"],
                     "update_type": result["change_type"],
                     "template_or_change_type": result
                     if result == "cluster_created"
@@ -128,129 +235,11 @@ async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
                 .encode()
         )
         await nw.publish("anomalies", prediction_payload)
-
-async def setup_es_connection():
-    logging.info("Setting up AsyncElasticsearch")
-    return AsyncElasticsearch(
-        [ES_ENDPOINT],
-        port=9200,
-        http_auth=(ES_USERNAME, ES_PASSWORD),
-        http_compress=True,
-        max_retries=10,
-        retry_on_status={100, 400, 503},
-        retry_on_timeout=True,
-        timeout=20,
-        use_ssl=True,
-        verify_certs=False,
-        sniff_on_start=False,
-        # refresh nodes after a node fails to respond
-        sniff_on_connection_fail=True,
-        # and also every 60 seconds
-        sniffer_timeout=60,
-        sniff_timeout=10,
-    )
+'''
 
 
-async def update_es_logs(queue):
-    es = await setup_es_connection()
-
-    async def doc_generator_anomaly(df):
-        for index, document in df.iterrows():
-            doc_dict = document.to_dict()
-            yield doc_dict
-
-    async def doc_generator(df):
-        for index, document in df.iterrows():
-            doc_dict = document.to_dict()
-            doc_dict["doc"] = {}
-            doc_dict["doc"]["drain_matched_template_id"] = doc_dict[
-                "drain_matched_template_id"
-            ]
-            doc_dict["doc"]["drain_matched_template_support"] = doc_dict[
-                "drain_matched_template_support"
-            ]
-            del doc_dict["drain_matched_template_id"]
-            del doc_dict["drain_matched_template_support"]
-            yield doc_dict
-
-    while True:
-        df = await queue.get()
-        df["_op_type"] = "update"
-        df["_index"] = "logs"
-
-        # update anomaly_predicted_count and anomaly_level for anomalous logs
-        anomaly_df = df[df["drain_prediction"] == 1]
-        if len(anomaly_df) == 0:
-            logging.info("No anomalies in this payload")
-        else:
-            script = (
-                "ctx._source.anomaly_predicted_count += 1; ctx._source.drain_anomaly = true; ctx._source.anomaly_level = "
-                "ctx._source.anomaly_predicted_count == 1 ? 'Suspicious' : ctx._source.anomaly_predicted_count == 2 ? "
-                "'Anomaly' : 'Normal';"
-            )
-            anomaly_df["script"] = script
-            try:
-                async for ok, result in async_streaming_bulk(
-                        es,
-                        doc_generator_anomaly(
-                            anomaly_df[["_id", "_op_type", "_index", "script"]]
-                        ),
-                        max_retries=1,
-                        initial_backoff=1,
-                        request_timeout=5,
-                ):
-                    action, result = result.popitem()
-                    if not ok:
-                        logging.error("failed to {} document {}".format())
-                logging.info(f"Updated {len(anomaly_df)} anomalies in ES")
-            except (BulkIndexError, ConnectionTimeout, TimeoutError) as exception:
-                logging.error(
-                    "Failed to index data. Re-adding to logs_to_update_in_elasticsearch queue"
-                )
-                logging.error(exception)
-                await queue.put(anomaly_df)
-            except TransportError as exception:
-                logging.info(f"Error in async_streaming_bulk {exception}")
-                if exception.status_code == "N/A":
-                    logging.info("Elasticsearch connection error")
-                    es = await setup_es_connection()
-
-        try:
-            # update normal logs in ES
-            async for ok, result in async_streaming_bulk(
-                    es,
-                    doc_generator(
-                        df[
-                            [
-                                "_id",
-                                "_op_type",
-                                "_index",
-                                "drain_matched_template_id",
-                                "drain_matched_template_support",
-                            ]
-                        ]
-                    ),
-                    max_retries=1,
-                    initial_backoff=1,
-                    request_timeout=5,
-            ):
-                action, result = result.popitem()
-                if not ok:
-                    logging.error("failed to {} document {}".format())
-            logging.info(f"Updated {len(df)} logs in ES")
-        except (BulkIndexError, ConnectionTimeout) as exception:
-            logging.error("Failed to index data")
-            logging.error(exception)
-            await queue.put(df)
-        except TransportError as exception:
-            logging.info(f"Error in async_streaming_bulk {exception}")
-            if exception.status_code == "N/A":
-                logging.info("Elasticsearch connection error")
-                es = await setup_es_connection()
-
-
-async def training_signal_check():
-    es = await setup_es_connection()
+'''
+async def training_signal_check(workload_template_miner):
 
     def weighted_avg_and_std(values, weights):
         average = np.average(values, weights=weights)
@@ -270,7 +259,7 @@ async def training_signal_check():
 
     while True:
         await asyncio.sleep(20)
-        num_drain_templates = len(template_miner.drain.clusters)
+        num_drain_templates = len(workload_template_miner.drain.clusters)
         if len(num_total_clusters_tracking_queue) == 0 and num_drain_templates == 0:
             logging.info("No DRAIN templates learned yet")
             continue
@@ -369,38 +358,11 @@ async def training_signal_check():
                     "update_type": "training_signal",
                     "timestamp": training_end_ts_ms,
                 }
-                try:
-                    await es.index(
-                        index="opni-drain-model-status", body=drain_status_doc
-                    )
-                except Exception as e:
-                    logging.error(
-                        "Error when indexing status to opni-drain-model-status"
-                    )
-
+'''
 
 async def init_nats():
     logging.info("connecting to nats")
     await nw.connect()
-
-
-async def wait_for_index():
-    es = await setup_es_connection()
-    while True:
-        try:
-            exists = await es.indices.exists("opni-normal-intervals")
-            if exists:
-                break
-            else:
-                logging.info("waiting for opni-normal-intervals index")
-                time.sleep(2)
-
-        except TransportError as exception:
-            logging.info(f"Error in es indices {exception}")
-            if exception.status_code == "N/A":
-                logging.info("Elasticsearch connection error")
-                es = await setup_es_connection()
-
 
 def main():
     fail_keywords_str = ""
@@ -412,35 +374,32 @@ def main():
         else:
             fail_keywords_str += f"({fail_keyword})"
     logging.info(f"fail_keywords_str = {fail_keywords_str}")
+    persistence = FilePersistence("workload_drain_model.bin")
 
+    workload_template_miner = TemplateMiner(persistence)
     loop = asyncio.get_event_loop()
-    incoming_logs_to_train_queue = asyncio.Queue(loop=loop)
-    model_to_save_queue = asyncio.Queue(loop=loop)
-    logs_to_update_in_elasticsearch = asyncio.Queue(loop=loop)
+    incoming_logs_queue = asyncio.Queue(loop=loop)
+    update_model_queue = asyncio.Queue(loop=loop)
+    batch_processed_queue = asyncio.Queue(loop=loop)
+    model_training_signal_queue = asyncio.Queue(loop=loop)
+
 
     # Run initialization tasks
     loop.run_until_complete(
         asyncio.gather(
             init_nats(),
-            wait_for_index(),
         )
     )
 
-    preprocessed_logs_consumer_coroutine = consume_logs(
-        incoming_logs_to_train_queue, logs_to_update_in_elasticsearch
-    )
-    train_coroutine = train_and_inference(
-        incoming_logs_to_train_queue, fail_keywords_str
-    )
-    update_es_coroutine = update_es_logs(logs_to_update_in_elasticsearch)
-    training_signal_coroutine = training_signal_check()
+    preprocessed_logs_consumer_coroutine = consume_logs(incoming_logs_queue, update_model_queue, batch_processed_queue, model_training_signal_queue)
+    inference_coroutine = inference_logs(incoming_logs_queue, workload_template_miner)
+    update_model_coroutine = update_model(update_model_queue, workload_template_miner)
+    persist_model_coroutine = persist_model(batch_processed_queue, workload_template_miner)
+    reset_model_coroutine = reset_model(model_training_signal_queue, workload_template_miner)
 
     loop.run_until_complete(
         asyncio.gather(
-            preprocessed_logs_consumer_coroutine,
-            train_coroutine,
-            update_es_coroutine,
-            training_signal_coroutine,
+            preprocessed_logs_consumer_coroutine,inference_coroutine, update_model_coroutine, persist_model_coroutine, reset_model_coroutine
         )
     )
     try:
