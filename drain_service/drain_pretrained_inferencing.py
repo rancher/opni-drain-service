@@ -29,7 +29,7 @@ def match_template(log_data, template_miner):
     return False, None
 
 
-async def load_pretrain_model():
+def load_pretrain_model():
     # This function will load the pretrained DRAIN model for control plane logs in addition to the anomaly level for each template.
     try:
         pretrained_template_miner = TemplateMiner()
