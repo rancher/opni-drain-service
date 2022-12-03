@@ -14,12 +14,9 @@ import botocore
 from botocore.client import Config
 from drain3.persistence_handler import PersistenceHandler
 
-# S3_ENDPOINT = os.environ["S3_ENDPOINT"]
-# S3_ACCESS_KEY = os.environ["S3_ACCESS_KEY"]
-# S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
-S3_ENDPOINT = os.getenv("S3_ENDPOINT", None)
-S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", None)
-S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", None)
+S3_ENDPOINT = os.environ["S3_ENDPOINT"]
+S3_ACCESS_KEY = os.environ["S3_ACCESS_KEY"]
+S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
 S3_BUCKET = os.getenv("S3_BUCKET", "opni-drain-model")
 
 

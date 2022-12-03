@@ -63,6 +63,7 @@ class TemplateMiner:
         self.last_save_time = time.time()
         if persistence_handler is not None:
             self.load_state()
+            
     def reset_model(self):
         self.drain = Drain(
             sim_th=self.config.drain_sim_th,
