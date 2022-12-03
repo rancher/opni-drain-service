@@ -33,5 +33,5 @@ exclude = '''
 
 [tool.pytest.ini_options]
 pythonpath = [
-  ".", "drain_service"
+"drain_service/"
 ]

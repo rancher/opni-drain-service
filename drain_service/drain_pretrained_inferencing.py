@@ -30,7 +30,9 @@ def match_template(log_data, template_miner):
 
 
 def load_pretrain_model():
+    '''
     # This function will load the pretrained DRAIN model for control plane logs in addition to the anomaly level for each template.
+    '''
     try:
         pretrained_template_miner = TemplateMiner()
         pretrained_template_miner.load_state("drain3_pretrained_model_v0.6.1.bin")
@@ -40,11 +42,12 @@ def load_pretrain_model():
         current_template_miner = TemplateMiner(persistence_handler=persistence, clusters_counter=num_pretrained_clusters)
         return pretrained_template_miner, current_template_miner
     except Exception as e:
-        logging.error(f"Unable to load DRAIN model {e}")
-        return None, None
+        raise Exception(f"Exit due to: Unable to load DRAIN model. {e}")
 
 async def consume_logs(incoming_cp_logs_queue, update_model_logs_queue, batch_processed_queue):
+    """
     # This function will subscribe to the Nats subjects preprocessed_logs_control_plane and anomalies.
+    """
     async def subscribe_handler(msg):
         payload_data = msg.data
         logs_payload_list = PayloadList()
@@ -87,7 +90,7 @@ async def persist_model(batch_processed_queue, current_template_miner):
             last_upload = time.time()
 
 
-async def inference_logs(incoming_logs_queue, pretrained_template_miner, current_template_miner):
+async def inference_logs_coroutine(incoming_logs_queue, pretrained_template_miner, current_template_miner):
     '''
         This function will be inferencing on logs which are sent over through Nats and using the DRAIN model to match the logs to a template.
         If no match is made, the log is then sent over to be inferenced on by the Deep Learning model.
@@ -166,7 +169,10 @@ async def update_model(update_model_logs_queue, current_template_miner):
             await nw.publish("templates_index", bytes(PayloadList(items=template_data)))
 
 async def init_nats():
+    """
     # This function initialized the connection to Nats.
+    """
+    
     logging.info("connecting to nats")
     await nw.connect()
 
@@ -180,14 +186,11 @@ def main():
     batch_processed_queue = asyncio.Queue(loop=loop)
     init_nats_task = loop.create_task(init_nats())
     loop.run_until_complete(init_nats_task)
-    init_model_task = loop.create_task(load_pretrain_model())
-    pretrained_template_miner, current_template_miner = loop.run_until_complete(init_model_task)
-    if not pretrained_template_miner:
-        sys.exit(1)
+    pretrained_template_miner, current_template_miner = load_pretrain_model()
 
     preprocessed_logs_consumer_coroutine = consume_logs(incoming_cp_logs_queue, update_model_logs_queue, batch_processed_queue)
 
-    match_cp_logs_coroutine = inference_logs(incoming_cp_logs_queue, pretrained_template_miner, current_template_miner)
+    match_cp_logs_coroutine = inference_logs_coroutine(incoming_cp_logs_queue, pretrained_template_miner, current_template_miner)
 
     update_model_coroutine = update_model(update_model_logs_queue, current_template_miner)
 
