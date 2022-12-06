@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import time
+from typing import Tuple
 
 # Third Party
 from drain3.file_persistence import FilePersistence
@@ -89,7 +90,7 @@ async def persist_model(batch_processed_queue : asyncio.Queue, current_template_
             last_upload = time.time()
 
 
-def inference_logs(logs_payload : PayloadList, pretrained_template_miner: TemplateMiner, current_template_miner: TemplateMiner, logs_inferenced_results : list,log_templates_modified: list):
+def inference_logs(logs_payload : PayloadList, pretrained_template_miner: TemplateMiner, current_template_miner: TemplateMiner, logs_inferenced_results : list,log_templates_modified: list) -> Tuple[list, list, list]:
     cp_model_logs = []
     rancher_model_logs = []
     longhorn_model_logs = []
