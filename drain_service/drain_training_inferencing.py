@@ -2,18 +2,15 @@
 import asyncio
 import json
 import logging
-import math
 import os
 import time
-from asyncio.exceptions import TimeoutError
 from collections import deque
 
 # Third Party
-import numpy as np
 import pandas as pd
-import ruptures as rpt
 from drain3.file_persistence import FilePersistence
 from drain3.template_miner import TemplateMiner
+from drain_pretrained_inferencing import match_template, persist_model
 from opni_nats import NatsWrapper
 from opni_proto.log_anomaly_payload_pb import Payload, PayloadList
 
@@ -32,20 +29,6 @@ num_total_clusters_tracking_queue = deque([], 200)
 resources_to_track = []
 
 nw = NatsWrapper()
-
-def match_template(log_data, template_miner):
-    result = template_miner.match(log_data.masked_log, log_data.log)
-    template, anomaly_level, cluster_id, template_log = result["template"], result["anomaly_level"], result["template_cluster_id"], result["template_log"]
-    if template:
-        log_data.anomaly_level = anomaly_level
-        log_data.template_cluster_id = cluster_id
-        log_data.template_matched = template
-        log_data.inference_model = "drain"
-        if template_log:
-            template_log_payload = Payload(log=template_log, template_matched=template, template_cluster_id=cluster_id, _id=str(cluster_id))
-            return True, template_log_payload
-        return True, None
-    return False, None
 
 
 async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, batch_processed_queue, model_training_signal_queue):
@@ -90,14 +73,6 @@ async def consume_logs(incoming_logs_to_train_queue, update_model_logs_queue, ba
         subscribe_handler=model_subscribe_handler
     )
 
-async def persist_model(batch_processed_queue, current_template_miner):
-    last_upload = time.time()
-    while True:
-        processed_payload = await batch_processed_queue.get()
-        current_time = time.time()
-        if current_time - last_upload >= 3600:
-            current_template_miner.save_state()
-            last_upload = time.time()
 
 async def reset_model(model_training_signal_queue, current_template_miner):
     while True:
@@ -108,7 +83,22 @@ async def reset_model(model_training_signal_queue, current_template_miner):
             current_template_miner.reset_model()
             current_template_miner.save_state()
 
-async def inference_logs(incoming_logs_queue, workload_template_miner):
+
+def inference_logs(logs_payload: PayloadList, workload_template_miner: TemplateMiner, logs_inferenced_results: list, log_templates_modified: list) -> list:
+    workload_model_logs = []
+    for log_data in logs_payload.items:
+        log_message = log_data.masked_log
+        if log_message:
+            current_template_matched, current_template_payload = match_template(log_data, workload_template_miner)
+            if current_template_matched:
+                logs_inferenced_results.append(log_data)
+                if current_template_payload:
+                    log_templates_modified.append(current_template_payload)
+            else:
+                workload_model_logs.append(log_data)
+    return workload_model_logs
+
+async def inference_logs_coroutine(incoming_logs_queue, workload_template_miner):
     '''
         This function will be inferencing on logs which are sent over through Nats and using the DRAIN model to match the logs to a template.
         If no match is made, the log is then sent over to be inferenced on by the Deep Learning model.
@@ -116,21 +106,13 @@ async def inference_logs(incoming_logs_queue, workload_template_miner):
     last_time = time.time()
     logs_inferenced_results = []
     log_templates_modified = []
-    workload_model_logs = []
     while True:
         logs_payload = await incoming_logs_queue.get()
         start_time = time.time()
-        logging.info("Received payload of size {}".format(len(logs_payload.items)))
-        for log_data in logs_payload.items:
-            log_message = log_data.masked_log
-            if log_message:
-                current_template_matched, current_template_payload = match_template(log_data, workload_template_miner)
-                if current_template_matched:
-                    logs_inferenced_results.append(log_data)
-                    if current_template_payload:
-                        log_templates_modified.append(current_template_payload)
-                else:
-                    workload_model_logs.append(log_data)
+        logging.info(f"Received payload of size {len(logs_payload.items)}")
+
+        workload_model_logs = inference_logs(logs_payload, workload_template_miner, logs_inferenced_results, log_templates_modified)
+
         if (start_time - last_time >= 1) or len(logs_inferenced_results) >= 128 or len(log_templates_modified) >= 128:
             if len(logs_inferenced_results) > 0:
                 await nw.publish("inferenced_logs", bytes(PayloadList(items=logs_inferenced_results)))
@@ -142,7 +124,6 @@ async def inference_logs(incoming_logs_queue, workload_template_miner):
         if len(workload_model_logs) > 0:
             await nw.publish("opnilog_workload_logs", bytes(PayloadList(items = workload_model_logs)))
             logging.info(f"Published {len(workload_model_logs)} logs to be inferenced on by Workload Deep Learning model.")
-            workload_model_logs = []
 
         logging.info(f"{len(logs_payload.items)} logs processed in {(time.time() - start_time)} second(s)")
 
@@ -164,201 +145,198 @@ async def update_model(update_model_logs_queue, workload_template_miner):
                 template_data.append(Payload(log=result["sample_log"], template_matched=result["template_mined"], template_cluster_id=result["cluster_id"], _id="0{}".format(result["cluster_id"]), log_type=log_data.log_type))
             final_inferenced_logs.append(log_data)
         await nw.publish("inferenced_logs", bytes(PayloadList(items = final_inferenced_logs)))
-        await nw.publish("batch_processed_workload", "processed".encode())
+        await nw.publish("batch_processed_workload", b"processed")
         if len(template_data) > 0:
             await nw.publish("templates_index", bytes(PayloadList(items=template_data)))
 
-'''
-async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
-    global num_no_templates_change_tracking_queue, num_templates_changed_tracking_queue, num_clusters_created_tracking_queue
-    while True:
-        logs_payload = await incoming_logs_to_train_queue.get()
-        inferencing_results = []
-        for log_data in logs_payload.iterrows():
-            log_message = log_data.masked_log
-            if log_message:
-                result = template_miner.add_log_message(log_message)
-                d = {
-                    "_id": log_data.["_id"],
-                    "update_type": result["change_type"],
-                    "template_or_change_type": result
-                    if result == "cluster_created"
-                    else str(result["cluster_id"]),
-                    "matched_template": result["template_mined"],
-                    "drain_matched_template_id": result["cluster_id"],
-                    "drain_matched_template_support": result["cluster_size"],
-                }
-                inferencing_results.append(d)
 
-        if not inferencing_results:
-            continue
+# async def train_and_inference(incoming_logs_to_train_queue, fail_keywords_str):
+#     global num_no_templates_change_tracking_queue, num_templates_changed_tracking_queue, num_clusters_created_tracking_queue
+#     while True:
+#         logs_payload = await incoming_logs_to_train_queue.get()
+#         inferencing_results = []
+#         for log_data in logs_payload.iterrows():
+#             log_message = log_data.masked_log
+#             if log_message:
+#                 result = template_miner.add_log_message(log_message)
+#                 d = {
+#                     "_id": log_data.["_id"],
+#                     "update_type": result["change_type"],
+#                     "template_or_change_type": result
+#                     if result == "cluster_created"
+#                     else str(result["cluster_id"]),
+#                     "matched_template": result["template_mined"],
+#                     "drain_matched_template_id": result["cluster_id"],
+#                     "drain_matched_template_support": result["cluster_size"],
+#                 }
+#                 inferencing_results.append(d)
 
-        df = pd.DataFrame(inferencing_results)
+#         if not inferencing_results:
+#             continue
 
-        update_counts = df["update_type"].value_counts().to_dict()
+#         df = pd.DataFrame(inferencing_results)
 
-        if "cluster_created" in update_counts:
-            num_clusters_created_tracking_queue.appendleft(
-                update_counts["cluster_created"]
-            )
+#         update_counts = df["update_type"].value_counts().to_dict()
 
-        if "cluster_template_changed" in update_counts:
-            num_templates_changed_tracking_queue.appendleft(
-                update_counts["cluster_template_changed"]
-            )
+#         if "cluster_created" in update_counts:
+#             num_clusters_created_tracking_queue.appendleft(
+#                 update_counts["cluster_created"]
+#             )
 
-        if "none" in update_counts:
-            num_no_templates_change_tracking_queue.appendleft(update_counts["none"])
+#         if "cluster_template_changed" in update_counts:
+#             num_templates_changed_tracking_queue.appendleft(
+#                 update_counts["cluster_template_changed"]
+#             )
 
-        # df['consecutive'] = df.template_or_change_type.groupby((df.template_or_change_type != df.template_or_change_type.shift()).cumsum()).transform('size')
-        df["drain_prediction"] = 0
-        if not fail_keywords_str:
-            fail_keywords_str = "a^"
-        df["drain_error_keyword"] = df["matched_template"].str.contains(fail_keywords_str, regex=True)
-        df.loc[
-            (df["drain_matched_template_support"] <= 10)
-            & (df["drain_matched_template_support"] != 10)
-            | (df["drain_error_keyword"] == True),
-            "drain_prediction",
-        ] = 1
-        prediction_payload = (
-            df[
-                [
-                    "_id",
-                    "drain_prediction",
-                    "drain_matched_template_id",
-                    "drain_matched_template_support",
-                    "drain_error_keyword",
-                ]
-            ]
-                .to_json()
-                .encode()
-        )
-        await nw.publish("anomalies", prediction_payload)
-'''
+#         if "none" in update_counts:
+#             num_no_templates_change_tracking_queue.appendleft(update_counts["none"])
 
+#         # df['consecutive'] = df.template_or_change_type.groupby((df.template_or_change_type != df.template_or_change_type.shift()).cumsum()).transform('size')
+#         df["drain_prediction"] = 0
+#         if not fail_keywords_str:
+#             fail_keywords_str = "a^"
+#         df["drain_error_keyword"] = df["matched_template"].str.contains(fail_keywords_str, regex=True)
+#         df.loc[
+#             (df["drain_matched_template_support"] <= 10)
+#             & (df["drain_matched_template_support"] != 10)
+#             | (df["drain_error_keyword"] == True),
+#             "drain_prediction",
+#         ] = 1
+#         prediction_payload = (
+#             df[
+#                 [
+#                     "_id",
+#                     "drain_prediction",
+#                     "drain_matched_template_id",
+#                     "drain_matched_template_support",
+#                     "drain_error_keyword",
+#                 ]
+#             ]
+#                 .to_json()
+#                 .encode()
+#         )
+#         await nw.publish("anomalies", prediction_payload)
 
-'''
-async def training_signal_check(workload_template_miner):
+# async def training_signal_check(workload_template_miner):
 
-    def weighted_avg_and_std(values, weights):
-        average = np.average(values, weights=weights)
-        # Fast and numerically precise:
-        variance = np.average((values - average) ** 2, weights=weights)
-        return average, math.sqrt(variance)
+#     def weighted_avg_and_std(values, weights):
+#         average = np.average(values, weights=weights)
+#         # Fast and numerically precise:
+#         variance = np.average((values - average) ** 2, weights=weights)
+#         return average, math.sqrt(variance)
 
-    iteration = 0
-    num_templates_in_last_train = 0
-    num_prev_breakpoints = 0
-    train_on_next_chance = True
-    stable = False
-    training_start_ts_ms = int(pd.to_datetime("now", utc=True).timestamp() * 1000)
-    very_first_ts_ns = training_start_ts_ms
+#     iteration = 0
+#     num_templates_in_last_train = 0
+#     num_prev_breakpoints = 0
+#     train_on_next_chance = True
+#     stable = False
+#     training_start_ts_ms = int(pd.to_datetime("now", utc=True).timestamp() * 1000)
+#     very_first_ts_ns = training_start_ts_ms
 
-    normal_periods = []
+#     normal_periods = []
 
-    while True:
-        await asyncio.sleep(20)
-        num_drain_templates = len(workload_template_miner.drain.clusters)
-        if len(num_total_clusters_tracking_queue) == 0 and num_drain_templates == 0:
-            logging.info("No DRAIN templates learned yet")
-            continue
-        iteration += 1
-        num_total_clusters_tracking_queue.appendleft(num_drain_templates)
-        logging.info(
-            "training_signal_check: num_total_clusters_tracking_queue {}".format(
-                num_total_clusters_tracking_queue
-            )
-        )
+#     while True:
+#         await asyncio.sleep(20)
+#         num_drain_templates = len(workload_template_miner.drain.clusters)
+#         if len(num_total_clusters_tracking_queue) == 0 and num_drain_templates == 0:
+#             logging.info("No DRAIN templates learned yet")
+#             continue
+#         iteration += 1
+#         num_total_clusters_tracking_queue.appendleft(num_drain_templates)
+#         logging.info(
+#             "training_signal_check: num_total_clusters_tracking_queue {}".format(
+#                 num_total_clusters_tracking_queue
+#             )
+#         )
 
-        if RETRAIN_OFTEN:
-            # more aggressive retraining
-            if len(list(num_total_clusters_tracking_queue)) > 10 and iteration % 180 == 0:
-                signal = np.array(list(reversed(num_total_clusters_tracking_queue)))
-                algo = rpt.Pelt(model="l1").fit(signal)
-                my_bkps = algo.predict(pen=100)
-                logging.info(f"breakpoints = {my_bkps}")
-                if len(my_bkps) > 1 and len(my_bkps) != num_prev_breakpoints:
-                    num_prev_breakpoints = len(my_bkps)
-                    logging.info(f"num_prev_breakpoints = {num_prev_breakpoints}")
-                    # calculate start_ts based on last change point
-                    training_start_ts_ms = pd.to_datetime("now", utc=True).timestamp() * 1000 - my_bkps[-2] * 20000 + 20000
-                    very_first_ts_ns = training_start_ts_ms
-                    num_total_clusters_tracking_queue.rotate(my_bkps[-2]*-1)
-                    train_on_next_chance = True
-                    stable = False
+#         if RETRAIN_OFTEN:
+#             # more aggressive retraining
+#             if len(list(num_total_clusters_tracking_queue)) > 10 and iteration % 180 == 0:
+#                 signal = np.array(list(reversed(num_total_clusters_tracking_queue)))
+#                 algo = rpt.Pelt(model="l1").fit(signal)
+#                 my_bkps = algo.predict(pen=100)
+#                 logging.info(f"breakpoints = {my_bkps}")
+#                 if len(my_bkps) > 1 and len(my_bkps) != num_prev_breakpoints:
+#                     num_prev_breakpoints = len(my_bkps)
+#                     logging.info(f"num_prev_breakpoints = {num_prev_breakpoints}")
+#                     # calculate start_ts based on last change point
+#                     training_start_ts_ms = pd.to_datetime("now", utc=True).timestamp() * 1000 - my_bkps[-2] * 20000 + 20000
+#                     very_first_ts_ns = training_start_ts_ms
+#                     num_total_clusters_tracking_queue.rotate(my_bkps[-2]*-1)
+#                     train_on_next_chance = True
+#                     stable = False
 
-        num_clusters = np.array(num_total_clusters_tracking_queue)[:50]
-        vol = np.std(num_clusters) / np.mean(num_clusters[:10])
-        time_steps = num_clusters.shape[0]
-        weights = np.flip(np.true_divide(np.arange(1, time_steps + 1), time_steps))
-        weighted_mean, weighted_std = weighted_avg_and_std(num_clusters, weights)
-        weighted_vol = weighted_std / np.mean(num_clusters[:10])
-        logging.info(
-            "ITERATION {}: vol= {} weighted_vol= {} normal_periods={}".format(
-                iteration, vol, weighted_vol, str(normal_periods)
-            )
-        )
+#         num_clusters = np.array(num_total_clusters_tracking_queue)[:50]
+#         vol = np.std(num_clusters) / np.mean(num_clusters[:10])
+#         time_steps = num_clusters.shape[0]
+#         weights = np.flip(np.true_divide(np.arange(1, time_steps + 1), time_steps))
+#         weighted_mean, weighted_std = weighted_avg_and_std(num_clusters, weights)
+#         weighted_vol = weighted_std / np.mean(num_clusters[:10])
+#         logging.info(
+#             "ITERATION {}: vol= {} weighted_vol= {} normal_periods={}".format(
+#                 iteration, vol, weighted_vol, str(normal_periods)
+#             )
+#         )
 
-        if len(num_total_clusters_tracking_queue) > 30:
-            if weighted_vol >= 0.199:
-                train_on_next_chance = True
+#         if len(num_total_clusters_tracking_queue) > 30:
+#             if weighted_vol >= 0.199:
+#                 train_on_next_chance = True
 
-            if (
-                    weighted_vol < 0.199
-                    and training_start_ts_ms != very_first_ts_ns
-                    and train_on_next_chance
-            ):
-                training_start_ts_ms = int(
-                    pd.to_datetime("now", utc=True).timestamp() * 1000
-                )
+#             if (
+#                     weighted_vol < 0.199
+#                     and training_start_ts_ms != very_first_ts_ns
+#                     and train_on_next_chance
+#             ):
+#                 training_start_ts_ms = int(
+#                     pd.to_datetime("now", utc=True).timestamp() * 1000
+#                 )
 
-            if weighted_vol > 0.155 and not train_on_next_chance and stable:
-                training_end_ts_ms = int(
-                    pd.to_datetime("now", utc=True).timestamp() * 1000
-                )
-                normal_periods.append(
-                    {"start_ts": training_start_ts_ms, "end_ts": training_end_ts_ms}
-                )
-                stable = False
-                training_start_ts_ms = -1.0
+#             if weighted_vol > 0.155 and not train_on_next_chance and stable:
+#                 training_end_ts_ms = int(
+#                     pd.to_datetime("now", utc=True).timestamp() * 1000
+#                 )
+#                 normal_periods.append(
+#                     {"start_ts": training_start_ts_ms, "end_ts": training_end_ts_ms}
+#                 )
+#                 stable = False
+#                 training_start_ts_ms = -1.0
 
-            if weighted_vol <= 0.15 and (
-                    train_on_next_chance
-                    or num_drain_templates > (2 * num_templates_in_last_train)
-            ):
-                num_templates_in_last_train = num_drain_templates
-                logging.info(f"SENDING TRAIN SIGNAL on iteration {iteration}")
-                if training_start_ts_ms != -1.0:
-                    training_end_ts_ms = int(
-                        pd.to_datetime("now", utc=True).timestamp() * 1000
-                    )
-                    normal_periods.append(
-                        {"start_ts": training_start_ts_ms, "end_ts": training_end_ts_ms}
-                    )
-                train_payload = {
-                    "start_ts": training_start_ts_ms,
-                    "end_ts": training_end_ts_ms,
-                }
-                try:
-                    await es.index(index="opni-normal-intervals", body=train_payload)
-                except Exception as e:
-                    logging.error("Error when indexing status to opni-normal-intervals")
+#             if weighted_vol <= 0.15 and (
+#                     train_on_next_chance
+#                     or num_drain_templates > (2 * num_templates_in_last_train)
+#             ):
+#                 num_templates_in_last_train = num_drain_templates
+#                 logging.info(f"SENDING TRAIN SIGNAL on iteration {iteration}")
+#                 if training_start_ts_ms != -1.0:
+#                     training_end_ts_ms = int(
+#                         pd.to_datetime("now", utc=True).timestamp() * 1000
+#                     )
+#                     normal_periods.append(
+#                         {"start_ts": training_start_ts_ms, "end_ts": training_end_ts_ms}
+#                     )
+#                 train_payload = {
+#                     "start_ts": training_start_ts_ms,
+#                     "end_ts": training_end_ts_ms,
+#                 }
+#                 try:
+#                     await es.index(index="opni-normal-intervals", body=train_payload)
+#                 except Exception as e:
+#                     logging.error("Error when indexing status to opni-normal-intervals")
 
-                await nw.publish("train", json.dumps(train_payload).encode())
-                train_on_next_chance = False
-                stable = True
+#                 await nw.publish("train", json.dumps(train_payload).encode())
+#                 train_on_next_chance = False
+#                 stable = True
 
-                training_start_ts_ms = int(
-                    pd.to_datetime("now", utc=True).timestamp() * 1000
-                )
+#                 training_start_ts_ms = int(
+#                     pd.to_datetime("now", utc=True).timestamp() * 1000
+#                 )
 
-                drain_status_doc = {
-                    "num_log_clusters": num_drain_templates,
-                    "update_type": "training_signal",
-                    "timestamp": training_end_ts_ms,
-                }
-'''
+#                 drain_status_doc = {
+#                     "num_log_clusters": num_drain_templates,
+#                     "update_type": "training_signal",
+#                     "timestamp": training_end_ts_ms,
+#                 }
+
 
 async def init_nats():
     logging.info("connecting to nats")
@@ -392,7 +370,7 @@ def main():
     )
 
     preprocessed_logs_consumer_coroutine = consume_logs(incoming_logs_queue, update_model_queue, batch_processed_queue, model_training_signal_queue)
-    inference_coroutine = inference_logs(incoming_logs_queue, workload_template_miner)
+    inference_coroutine = inference_logs_coroutine(incoming_logs_queue, workload_template_miner)
     update_model_coroutine = update_model(update_model_queue, workload_template_miner)
     persist_model_coroutine = persist_model(batch_processed_queue, workload_template_miner)
     reset_model_coroutine = reset_model(model_training_signal_queue, workload_template_miner)

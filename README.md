@@ -12,7 +12,7 @@ pip install -r test-requirements.txt
 
 run pytest and check the coverage:
 ```
-pytest --cov
+pytest --cov drain_service
 ```
 
 ## Contributing
