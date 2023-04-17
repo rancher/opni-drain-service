@@ -4,8 +4,8 @@ Adopted from https://github.com/IBM/Drain3
 # Standard Library
 import base64
 import logging
-import re
 import pathlib
+import re
 import time
 import zlib
 
@@ -63,6 +63,7 @@ class TemplateMiner:
         self.last_save_time = time.time()
         if persistence_handler is not None:
             self.load_state()
+
     def reset_model(self):
         self.drain = Drain(
             sim_th=self.config.drain_sim_th,
@@ -170,6 +171,10 @@ class TemplateMiner:
         return result
 
     def add_log_template(self, log_template: str, pretrained: bool, anomaly_level: str) -> dict:
+        '''
+        An Alter to `add_log_message`. Always add a new branch to the tree.
+        Only used by the pretrained Drain model, to avoid updating the pretrained knowledge.
+        '''
         self.profiler.start_section("total")
 
         self.profiler.start_section("drain")

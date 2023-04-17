@@ -38,17 +38,18 @@ class FilePersistence(PersistenceHandler):
             )
             logging.info("Connected to S3 client")
         except Exception as e:
-            logging.error("Unable to connect to S3 client right now.")
+            raise Exception("Unable to connect to S3 client right now.")
 
-        exists = True
         try:
             self.s3_client.meta.client.head_bucket(Bucket=S3_BUCKET)
+            exists = True
         except botocore.exceptions.ClientError as e:
             # If a client error is thrown, then check that it was a 404 error.
             # If it was a 404 error, then the bucket does not exist.
             error_code = e.response["Error"]["Code"]
             if error_code == "404":
                 exists = False
+
         if exists:
             logging.info(f"{S3_BUCKET} bucket exists")
         else:
@@ -72,9 +73,8 @@ class FilePersistence(PersistenceHandler):
                 S3_BUCKET, self.file_path, self.file_path
             )
             logging.info("Downloaded DRAIN model file from S3")
+            return pathlib.Path(self.file_path).read_bytes()
         except Exception as e:
             logging.error("Cannot currently obtain DRAIN model file")
-        if not os.path.exists(self.file_path):
+            logging.error(e)
             return None
-
-        return pathlib.Path(self.file_path).read_bytes()
