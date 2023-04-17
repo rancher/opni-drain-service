@@ -35,7 +35,7 @@ def load_pretrain_model():
     '''
     try:
         pretrained_template_miner = TemplateMiner()
-        pretrained_template_miner.load_state("drain3_pretrained_model_v0.6.1.bin")
+        pretrained_template_miner.load_state("drain3_pretrained_model_v0.8.2.bin")
         num_pretrained_clusters = pretrained_template_miner.drain.clusters_counter
         logging.info(f"Able to load the DRAIN control plane model with {num_pretrained_clusters} clusters.")
         persistence = FilePersistence("drain3_non_workload_model.bin")
